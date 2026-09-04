@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Generated output and the cached API payload
+dist/
+
+# Never commit credentials
+secret.md
+.env
