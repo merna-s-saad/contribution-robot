@@ -3,7 +3,7 @@
 updated-at: 2026-09-04
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 43 tests, ~0.2s
+.venv/bin/python -m pytest tests/ -q      # 55 tests, ~0.2s
 ruff check scripts/ tests/
 ```
 
@@ -15,7 +15,8 @@ No network is touched by any test. `requests` is imported lazily inside
 | Area | Tests |
 |---|---|
 | Normalisation | 53×7 shape, partial first/last weeks padded not skipped, >53 weeks trimmed to the most recent, <53 padded left, all five levels produced |
-| Path | no revisits, starts col 0, ends col 52, every step 8-way connected, wanders (backtracks + vertical moves + longer than a straight march), deterministic for a fixed seed |
+| Path | no revisits, ends col 52, every step 8-way connected, wanders (backtracks + vertical moves + longer than a straight march), deterministic for a fixed seed |
+| Start column | backs up exactly 2 from the first active column (parametrised over 0/1/2/3/14/30), empty grid falls back to column 0, walk never enters the dead region, dead columns still render as normal unanimated cells, shorter span → fewer cells at a slower base step, `target_cells` scales with the span and honours its floor, full-width calendars reproduce `MIN_CELLS` exactly, late-start render still meets the 20–25s / no-script / 150 KB / determinism budgets |
 | Timing | run lands in 20–25s, slots contiguous and ordered, dwell slot is exactly 3× a normal slot and only on ≥75th-percentile cells |
 | Pose timeline | segments tile the whole cycle with no overlap (so exactly one pose is ever visible), grab covers every dwell beat, facing flips on leftward travel |
 | Sprite | all six symbols present, one shared viewBox, no hex literals, mini drops the chest panel and thickens strokes, mirror is in-place and never vertical, `robot_use` centres on its point |

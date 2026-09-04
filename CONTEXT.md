@@ -85,14 +85,32 @@ GitHub's own level enum.
 ## The wander
 
 - Seeded `random.Random(end_date.isoformat())`.
-- Starts in column 0 on a random row; 8-way steps; never revisits a cell.
+- **Starts at the first active column, not column 0.** `first_active_column()`
+  finds the leftmost column with any contributions, and `start_column()` backs
+  up `LEAD_IN_COLS = 2` for lead-in (falling back to 0 on a wholly empty grid).
+  Without this, a calendar with a long dead stretch at the start has the robot
+  trudging through empty columns for most of the animation. Columns left of the
+  start still render as normal cells — the robot simply never walks them, and
+  the neighbour scan, `_has_escape` and `_nearest_unvisited` are all bounded at
+  `start` so nothing can drop it back into the dead region.
+- Random row; 8-way steps; never revisits a cell.
 - Candidate score = own count ×2 + a distance-weighted peek at the next 3
   columns (rows ±1), all normalised by the year's max count, plus a constant
   rightward drift (`BASE_DRIFT = 0.6`) and a seeded jitter (0.15).
-- **Pacing gate** (`MIN_CELLS = 78`, `GATE_SLACK = 2`): the robot may not be
-  further right than `52 * len(path) / 78 + 2`. It presses against this gate
-  and spends the surplus wandering vertically. This is what makes it a wander
-  rather than a sweep.
+- **Pacing gate** (`GATE_SLACK = 2`): the robot may not be further right than
+  `start + span * len(path) / target + 2`, where `span = 52 - start`. It
+  presses against this gate and spends the surplus wandering vertically. This
+  is what makes it a wander rather than a sweep.
+- **Target length scales with the span.** `target_cells(start)` returns
+  `round(CELLS_PER_COLUMN * span)`, floored at `MIN_CELLS_FLOOR = 24` and
+  capped at what is reachable (`span * 7`). `CELLS_PER_COLUMN` is derived as
+  `MIN_CELLS / COLS ≈ 1.472`, chosen so a full-width calendar computes to
+  exactly 78 and reproduces the pre-start-column behaviour byte for byte.
+  Because `base_step = 22 / total_units` is derived, a shorter span means
+  fewer cells over the same 22s — i.e. a slower, more deliberate pace, rather
+  than the same sprint followed by idling. The floor exists because a
+  three-column active region would otherwise collapse to ~4 cells and give
+  single steps over five seconds long.
 - **Trap penalty** (`TRAP_PENALTY = 10`): a candidate with no unvisited
   neighbour of its own is heavily penalised, which keeps the walk 8-way
   connected instead of having to teleport out of a dead end.
@@ -102,8 +120,13 @@ GitHub's own level enum.
 - Dwell: a cell whose count is at or above the 75th percentile of non-zero
   counts holds for 3× a normal step.
 
-On the sample fixture: 76 cells, 22 backtracking moves, 51 vertical moves,
-32 dwells, ends at column 52, collects 312 of 742 contributions.
+On `sample_calendar.json` (active from column 0): starts at column 0, 76 cells,
+22 backtracking moves, 51 vertical moves, 32 dwells, ends at column 52, base
+step 0.157s, collects 312 of 742.
+
+On `late_start_calendar.json` (dead until column 16): starts at column 14,
+55 cells, never goes left of 14, ends at column 52, base step 0.214s — 36%
+slower — collects 363 of 818.
 
 ## Timing
 
@@ -218,7 +241,7 @@ This was raised with the user before implementation and approved (option 1).
 
 ## Verification performed
 
-`ruff check` clean; 43 pytest tests pass; rendered from the fixture and
+`ruff check` clean; 55 pytest tests pass; rendered from both fixtures and
 screenshotted in headless Chrome at five seeked timestamps. At each one exactly
 one counter value and exactly one sprite pose were opaque, the collected count
 matched the timeline, and the robot's computed transform matched the expected
@@ -251,7 +274,7 @@ confirmed correct.
 
 - Never run against the live API — no token was available in this session. The
   fetch path is unit-tested for error handling but has not made a real request.
-- The fixture is synthetic (seeded generator, weekday-heavy, a holiday gap, a
+- Both fixtures are synthetic (seeded generator, weekday-heavy, a holiday gap, a
   few spikes). Replacing it with a real `last_fetch.json` will change the path
   and the numbers in the path-shape tests' tolerances, though all assertions
   are written as ranges rather than exact values.

@@ -1,5 +1,38 @@
 # CHANGELOG
 
+## 2026-09-04 — Skip a dead lead-in; scale the pace to the active span
+
+### What changed
+- `scripts/generate_robot_svg.py`: new `first_active_column()`, `start_column()`
+  and `target_cells()`. The walk now starts two columns before the first column
+  with any contributions instead of at column 0, so a calendar with a long dead
+  stretch at the start no longer spends most of the animation on empty cells.
+- The pacing gate, the neighbour scan, `_has_escape()` and `_nearest_unvisited()`
+  are all bounded at the start column, so nothing can drop the robot back into
+  the dead region.
+- Path length now scales with the active span (`CELLS_PER_COLUMN ≈ 1.472`,
+  floored at 24 and capped at `span * 7`). Since the step duration is derived
+  from a fixed 22s run, a shorter span yields a slower, more deliberate pace
+  rather than a sprint followed by idling.
+- `tests/fixtures/late_start_calendar.json` (new): same shape as the main
+  fixture but dead until column 16.
+- 12 new tests (43 → 55).
+
+### Decisions
+- `CELLS_PER_COLUMN` is derived as `MIN_CELLS / COLS` rather than picked, so a
+  full-width calendar computes to exactly 78 cells and reproduces the previous
+  behaviour byte for byte. Verified: `dist/contribution-robot.svg` from
+  `sample_calendar.json` is unchanged (sha256 `898304ba…`).
+- Floor of 24 cells: a three-column active region would otherwise collapse to
+  ~4 cells and give single steps over five seconds long.
+- Palette untouched, as instructed.
+
+### Verification
+`ruff check` clean, 55/55 tests pass. Both fixtures rendered and checked in
+headless Chrome at seeked timestamps. The late-start render starts at column 14
+(robot x≈286 at t=0.2s, not 48.5), the dead columns draw as ordinary cells with
+no animation, and the counter runs 0 → 146 → 343 → 363. 63.0 KB.
+
 ## 2026-09-04 — Daily publishing workflow
 
 ### What changed
