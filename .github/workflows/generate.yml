@@ -1,0 +1,62 @@
+name: Generate contribution robot
+
+on:
+  schedule:
+    # Daily at 08:00 UTC — roughly midnight Pacific.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    # Code edits get a fresh render without waiting for the cron.
+    paths:
+      - "scripts/**"
+
+# A manual run and the cron must not publish over each other. Queue the second
+# one rather than cancelling it, so a hand-triggered run always completes.
+concurrency:
+  group: generate
+  cancel-in-progress: false
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Render the SVG
+        # The generator exits 2 on a missing token, 3 on an API or transport
+        # failure and 4 on bad data, so any of those fails the run here and the
+        # publish step below never executes. There is deliberately no fallback:
+        # a red run beats silently publishing a stale or empty graphic.
+        run: |
+          python scripts/generate_robot_svg.py \
+            --username merna-s-saad \
+            --token ${{ secrets.CONTRIBUTION_TOKEN }} \
+            --out dist/contribution-robot.svg
+
+      - name: Stamp the run date
+        id: stamp
+        run: echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+
+      - name: Publish to the output branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: output
+          publish_dir: ./dist
+          commit_message: "build: regenerate contribution robot ${{ steps.stamp.outputs.date }}"

@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## 2026-09-04 — Daily publishing workflow
+
+### What changed
+- `.github/workflows/generate.yml` (new). Regenerates the SVG on a daily cron
+  (`0 8 * * *`), on `workflow_dispatch`, and on a push to `main` touching
+  `scripts/**`. Publishes `dist/` to a dedicated `output` branch with
+  `peaceiris/actions-gh-pages@v4`. 10 minute timeout, `contents: write`,
+  `concurrency: {group: generate, cancel-in-progress: false}`.
+- `dist/` untracked from `main` and returned to `.gitignore`, reverting the
+  tracking added in `4bfca4f`. The output branch is the single home for
+  generated files; keeping a copy on main defeated the point.
+- `CONTEXT.md` gained an Automation section; `HANDOFF.md` next priorities
+  rewritten around the workflow's first run.
+
+### Decisions
+- **No failure fallback.** The generator's exit codes (2/3/4) fail the render
+  step, so the publish step never runs. A red run is better than silently
+  publishing a stale or blank graphic.
+- `last_fetch.json` is published alongside the SVG — public data, and it is the
+  fixture format.
+- Secrets: `CONTRIBUTION_TOKEN` (`read:user`) for the API call, built-in
+  `GITHUB_TOKEN` for the publish step. Neither is committed anywhere.
+
+### Known issues
+- The workflow has never run. Its first execution is also the first time the
+  live API path will have been exercised at all.
+
 ## 2026-09-04 — Initial build: generator, sprite, tests
 
 ### What changed

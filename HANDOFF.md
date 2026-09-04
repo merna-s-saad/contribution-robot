@@ -36,14 +36,19 @@ live fetch has never actually run.
 
 ## Next priorities
 
-1. **Live run.** `export GITHUB_TOKEN=...` then run without `--fixture`.
-   Confirm the real calendar's shape (GitHub sometimes returns 54 weeks — the
-   trim path is tested but unexercised in anger) and replace
-   `tests/fixtures/sample_calendar.json` with the real `dist/last_fetch.json`.
-   Then re-read `test_path_wanders_rather_than_sweeping`, whose thresholds are
-   tuned to the synthetic fixture.
-2. **GitHub Action** on a daily cron to regenerate and commit the SVG.
-3. **README** with the embed snippet and a preview.
+1. **Trigger the workflow by hand** from the Actions tab (`workflow_dispatch`)
+   and watch it. This is the first time the live API path will ever have run,
+   so failures are likeliest here: a `CONTRIBUTION_TOKEN` without `read:user`
+   fails at the render step with exit 3, and the publish step needs the `output`
+   branch to be creatable (it does not exist yet — the action creates it).
+2. **Real fixture.** Once a run succeeds, pull `last_fetch.json` off the
+   `output` branch and replace `tests/fixtures/sample_calendar.json` with it.
+   Confirm the real calendar's shape first (GitHub sometimes returns 54 weeks —
+   the trim path is tested but unexercised in anger), then re-read
+   `test_path_wanders_rather_than_sweeping`, whose thresholds are tuned to the
+   synthetic fixture.
+3. **README** with the embed snippet pointing at the raw URL on `output`, e.g.
+   `https://raw.githubusercontent.com/merna-s-saad/contribution-robot/output/contribution-robot.svg`.
 4. Optional: drop the three detailed sprite symbols from `<defs>` (~2 KB) if the
    size budget ever tightens — nothing references them at runtime.
 

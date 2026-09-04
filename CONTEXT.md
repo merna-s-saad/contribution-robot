@@ -189,6 +189,33 @@ This was raised with the user before implementation and approved (option 1).
    a.currentTime = T})`, then screenshot. This is how the render was verified
    at t = 0, 5.5, 11, 16.5, 22.5s.
 
+## Automation
+
+`.github/workflows/generate.yml` regenerates and publishes the SVG.
+
+- Remote: `https://github.com/merna-s-saad/contribution-robot`, default branch
+  `main`.
+- Triggers: cron `0 8 * * *` (08:00 UTC ≈ midnight Pacific), `workflow_dispatch`
+  for a manual run, and a push to `main` touching `scripts/**` so a code edit
+  renders without waiting a day.
+- `concurrency: {group: generate, cancel-in-progress: false}` — a manual run and
+  the cron queue behind each other instead of racing to publish. Not cancelled,
+  so a hand-triggered run always finishes.
+- 10 minute job timeout, `permissions: contents: write`.
+- Publishes the whole of `dist/` to a dedicated **`output`** branch via
+  `peaceiris/actions-gh-pages@v4`, which force-pushes it. That keeps a daily
+  commit of a regenerated ~73 KB file out of `main`'s history. The README will
+  point at the raw URL on `output`. `last_fetch.json` rides along, which is
+  intentional — it is public data and the fixture format.
+- Auth: `CONTRIBUTION_TOKEN` (repo secret, `read:user`) for the GraphQL call;
+  the built-in `GITHUB_TOKEN` for the publish step.
+- **No failure fallback, on purpose.** The generator exits 2/3/4 on a missing
+  token, API failure or bad data, which fails the render step so the publish
+  step never runs. A red run beats silently shipping a stale or blank graphic.
+- `dist/` is gitignored on `main`. It was briefly tracked there (commit
+  `4bfca4f`) and untracked again once the output branch existed — do not
+  re-add it, the duplication is the exact thing the branch avoids.
+
 ## Verification performed
 
 `ruff check` clean; 43 pytest tests pass; rendered from the fixture and
@@ -228,9 +255,9 @@ confirmed correct.
   few spikes). Replacing it with a real `last_fetch.json` will change the path
   and the numbers in the path-shape tests' tolerances, though all assertions
   are written as ranges rather than exact values.
-- No GitHub Action yet to regenerate the SVG on a schedule and commit it. That
-  is the obvious next step for actually using this in a profile README.
-- No README.md.
+- The daily workflow has never actually run. Its first execution will be the
+  first time the live API path is exercised at all.
+- No README.md, so nothing yet references the raw URL on the `output` branch.
 - `robot-stand` / `robot-step` / `robot-grab` (the detailed trio) are emitted
   into every SVG's `<defs>` but never referenced by the animation. They cost
   ~2 KB. Worth pruning if the size budget ever gets tight, or worth using for a
