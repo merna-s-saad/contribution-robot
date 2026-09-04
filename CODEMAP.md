@@ -1,6 +1,6 @@
 # CODEMAP
 
-updated-at: 2026-09-04 (pre-first-commit)
+updated-at: c78834a
 
 Navigation map for `contribution-robot`. Read this before opening files.
 

@@ -1,6 +1,6 @@
 # CONTEXT
 
-updated-at: 2026-09-04 (no commits yet at time of writing)
+updated-at: c78834a
 
 The living snapshot of this project. Read with `CODEMAP.md`.
 
