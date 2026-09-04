@@ -98,6 +98,12 @@ GAIT_PERIOD = 0.4  # full stand -> step -> stand cycle while travelling
 # --------------------------------------------------------------------------
 
 MIN_CELLS = 78  # a straight march is 53; the extra length is the wander
+# Path length scales with the active span, so a short span means a slower,
+# more deliberate pace rather than the same sprint over fewer cells. Derived
+# from MIN_CELLS so a full-width calendar reproduces the old 78 exactly.
+CELLS_PER_COLUMN = MIN_CELLS / COLS
+MIN_CELLS_FLOOR = 24  # below this a single step gets long enough to look broken
+LEAD_IN_COLS = 2  # blank columns kept before the first active one
 GATE_SLACK = 2  # columns the walk may run ahead of its pace
 MAX_STEPS = 150
 LOOKAHEAD_COLS = 3
@@ -355,6 +361,35 @@ def count_at(grid: Grid, col: int, row: int) -> int:
     return cell.count if cell else 0
 
 
+def first_active_column(grid: Grid) -> int | None:
+    """Index of the leftmost column with any contributions at all."""
+    for col, column in enumerate(grid):
+        if any(cell and cell.count > 0 for cell in column):
+            return col
+    return None
+
+
+def start_column(grid: Grid) -> int:
+    """Where the robot enters the grid.
+
+    A calendar with a long dead stretch at the start would otherwise have the
+    robot trudging through empty columns for most of the animation. Skip to
+    just before the first real activity, keeping a couple of blank columns as
+    lead-in. Everything left of this still renders as normal cells -- the robot
+    simply never walks there.
+    """
+    first = first_active_column(grid)
+    return 0 if first is None else max(0, first - LEAD_IN_COLS)
+
+
+def target_cells(start: int) -> int:
+    """How many cells the walk should cover, given where it starts."""
+    span = COLS - start
+    reachable = span * ROWS
+    scaled = round(CELLS_PER_COLUMN * span)
+    return max(min(MIN_CELLS_FLOOR, reachable), min(scaled, reachable))
+
+
 def lookahead_score(grid: Grid, col: int, row: int, scale: float) -> float:
     """Own count, plus a distance-weighted peek at the next 3 columns."""
     score = 2.0 * count_at(grid, col, row) / scale
@@ -375,6 +410,9 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
 
     The gate also has to exist: with no cap the walk reaches the last column
     early, exhausts those seven cells, and can never get back to the edge.
+
+    The walk starts at the first active column rather than at column 0, and
+    both the gate and the target length are measured over that shorter span.
     """
     scale = float(
         max(
@@ -382,8 +420,12 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
             max((cell.count for column in grid for cell in column if cell), default=1),
         )
     )
+    start = start_column(grid)
+    span = COLS - 1 - start
+    wanted = target_cells(start)
+
     row = rng.randrange(ROWS)
-    col = 0
+    col = start
     path: list[tuple[int, int]] = [(col, row)]
     visited: set[tuple[int, int]] = {(col, row)}
 
@@ -391,7 +433,7 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
         if col == COLS - 1:
             break
 
-        gate = min(COLS - 1, (COLS - 1) * len(path) // MIN_CELLS + GATE_SLACK)
+        gate = min(COLS - 1, start + span * len(path) // wanted + GATE_SLACK)
 
         best: tuple[int, int] | None = None
         best_score = float("-inf")
@@ -399,7 +441,7 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
         loose_score = float("-inf")
         for dc, dr in NEIGHBOURS:
             nc, nr = col + dc, row + dr
-            if not (0 <= nc < COLS and 0 <= nr < ROWS):
+            if not (start <= nc < COLS and 0 <= nr < ROWS):
                 continue
             if (nc, nr) in visited:
                 continue
@@ -408,7 +450,7 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
                 + BASE_DRIFT * dc
                 + rng.random() * JITTER
             )
-            if not _has_escape(visited, nc, nr):
+            if not _has_escape(visited, nc, nr, start):
                 score -= TRAP_PENALTY  # would strand the robot next step
             if score > loose_score:
                 loose_score, loose = score, (nc, nr)
@@ -416,7 +458,7 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
                 best_score, best = score, (nc, nr)
 
         # Ignore the gate rather than stall; hop only if truly boxed in.
-        best = best or loose or _nearest_unvisited(grid, visited, col, scale)
+        best = best or loose or _nearest_unvisited(grid, visited, col, scale, start)
         if best is None:
             break
 
@@ -427,10 +469,16 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
     return path
 
 
-def _has_escape(visited: set[tuple[int, int]], col: int, row: int) -> bool:
-    """True if (col, row) still has an unvisited 8-way neighbour."""
+def _has_escape(
+    visited: set[tuple[int, int]], col: int, row: int, start: int
+) -> bool:
+    """True if (col, row) still has an unvisited 8-way neighbour.
+
+    Columns left of ``start`` do not count -- the robot never walks there, so
+    an "escape" into the dead region is not an escape at all.
+    """
     return any(
-        0 <= col + dc < COLS
+        start <= col + dc < COLS
         and 0 <= row + dr < ROWS
         and (col + dc, row + dr) not in visited
         for dc, dr in NEIGHBOURS
@@ -438,9 +486,9 @@ def _has_escape(visited: set[tuple[int, int]], col: int, row: int) -> bool:
 
 
 def _nearest_unvisited(
-    grid: Grid, visited: set[tuple[int, int]], col: int, scale: float
+    grid: Grid, visited: set[tuple[int, int]], col: int, scale: float, start: int
 ) -> tuple[int, int] | None:
-    for search_col in list(range(col + 1, COLS)) + list(range(col - 1, -1, -1)):
+    for search_col in list(range(col + 1, COLS)) + list(range(col - 1, start - 1, -1)):
         candidates = [
             (search_col, r) for r in range(ROWS) if (search_col, r) not in visited
         ]
