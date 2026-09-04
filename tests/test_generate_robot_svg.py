@@ -19,6 +19,36 @@ import generate_robot_svg as gen
 import robot_sprite as sprite
 
 FIXTURE = REPO_ROOT / "tests" / "fixtures" / "sample_calendar.json"
+LATE_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "late_start_calendar.json"
+
+
+def _grid(path: Path) -> gen.Grid:
+    weeks, _ = gen.extract_weeks(json.loads(path.read_text(encoding="utf-8")))
+    return gen.build_grid(weeks)
+
+
+def _walk(grid: gen.Grid) -> list[tuple[int, int]]:
+    return gen.build_path(grid, random.Random(gen.grid_end_date(grid).isoformat()))
+
+
+def _empty_grid(active_from: int | None) -> gen.Grid:
+    """A grid whose columns before ``active_from`` have no contributions."""
+    weeks = [
+        {
+            "contributionDays": [
+                {
+                    "date": "2024-01-07",
+                    "contributionCount": (
+                        0 if active_from is None or col < active_from else col + 1
+                    ),
+                    "weekday": row,
+                }
+                for row in range(7)
+            ]
+        }
+        for col in range(gen.COLS)
+    ]
+    return gen.build_grid(weeks)
 
 
 @pytest.fixture(scope="module")
@@ -146,6 +176,79 @@ def test_render_is_byte_identical_across_runs(grid: gen.Grid) -> None:
     assert gen.render_svg(grid, "merna-s-saad", 742) == gen.render_svg(
         grid, "merna-s-saad", 742
     )
+
+
+# ------------------------------------------------------------- start column
+
+
+@pytest.mark.parametrize("active_from", [0, 1, 2, 3, 14, 30])
+def test_start_backs_up_two_columns_from_the_first_active_one(
+    active_from: int,
+) -> None:
+    grid = _empty_grid(active_from)
+    assert gen.first_active_column(grid) == active_from
+    assert gen.start_column(grid) == max(0, active_from - gen.LEAD_IN_COLS)
+
+
+def test_a_completely_empty_grid_falls_back_to_column_zero() -> None:
+    grid = _empty_grid(None)
+    assert gen.first_active_column(grid) is None
+    assert gen.start_column(grid) == 0
+
+
+def test_walk_never_enters_the_dead_region() -> None:
+    grid = _grid(LATE_FIXTURE)
+    start = gen.start_column(grid)
+    assert start > 0, "fixture must have a dead lead-in"
+    path = _walk(grid)
+    assert path[0][0] == start
+    assert min(col for col, _ in path) == start, "nothing left of the start"
+    assert path[-1][0] == gen.COLS - 1, "still crosses to the right edge"
+
+
+def test_dead_columns_still_render_as_normal_cells() -> None:
+    grid = _grid(LATE_FIXTURE)
+    svg = gen.render_svg(grid, "merna-s-saad", 818)
+    start = gen.start_column(grid)
+    for col in range(start):
+        assert f'x="{gen.num(gen.cell_x(col))}"' in svg
+    # ...but none of them is animated, because the robot never lands there.
+    steps = gen.build_timeline(grid, _walk(grid))
+    assert all(step.col >= start for step in steps)
+    assert svg.count(" col\"") == len(steps)
+
+
+def test_shorter_span_walks_fewer_cells_at_a_slower_pace() -> None:
+    full, late = _grid(FIXTURE), _grid(LATE_FIXTURE)
+    assert gen.start_column(full) == 0 and gen.start_column(late) > 0
+
+    def base_step(grid: gen.Grid) -> float:
+        steps = gen.build_timeline(grid, _walk(grid))
+        normal = next(step for step in steps if not step.dwell)
+        return normal.depart - normal.arrive
+
+    assert len(_walk(late)) < len(_walk(full)), "shorter span, fewer cells"
+    assert base_step(late) > base_step(full), "and a more deliberate pace"
+
+
+def test_target_cells_scales_with_the_span_and_has_a_floor() -> None:
+    # A full-width calendar reproduces the original tuning exactly.
+    assert gen.target_cells(0) == gen.MIN_CELLS
+    assert gen.target_cells(20) < gen.target_cells(0)
+    # A tiny active region does not collapse to a handful of very long steps.
+    assert gen.target_cells(gen.COLS - 3) >= min(
+        gen.MIN_CELLS_FLOOR, 3 * gen.ROWS
+    )
+
+
+def test_late_start_render_still_meets_every_budget() -> None:
+    grid = _grid(LATE_FIXTURE)
+    steps = gen.build_timeline(grid, _walk(grid))
+    assert 20.0 <= steps[-1].depart <= 25.0
+    svg = gen.render_svg(grid, "merna-s-saad", 818)
+    assert "<script" not in svg.lower()
+    assert len(svg.encode("utf-8")) < 150_000
+    assert gen.render_svg(grid, "merna-s-saad", 818) == svg, "still deterministic"
 
 
 # ------------------------------------------------------------------- timing
