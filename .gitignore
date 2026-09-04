@@ -4,8 +4,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
-# Generated output and the cached API payload
-dist/
+# Generated output. The SVG is committed so a README can point at it;
+# the cached API payload is not.
+dist/*
+!dist/contribution-robot.svg
 
 # Never commit credentials
 secret.md
