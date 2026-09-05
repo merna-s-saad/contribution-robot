@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## 2026-09-05 — Publish the wordmark daily; fix its calendar span
+
+### What changed
+- `.github/workflows/generate.yml`: a second render step produces
+  `dist/wordmark-robot.svg` with `--word MERNA`. It needs no token and runs
+  after the API step, so a token failure still fails the run before anything
+  publishes. Regenerated daily rather than committed once because its month
+  labels track today's date.
+- `keep_files: true` on the publish step. The action's default is `false`,
+  which deletes anything on the publish branch not present in `publish_dir`
+  on that run.
+
+### Bug found and fixed
+`build_word_grid` truncated the calendar at exactly 364 days, but GitHub
+returns **whole weeks** — the first column starts on the Sunday on or before a
+year ago and is complete, only the last column is partial. The real payload
+spans 370 days, not 365. The truncation left column 0 with two cells and
+shifted the first month label, so the published pair read `Sep Oct Nov ...`
+against `Aug Oct Nov ...`. Caught by diffing the two SVGs actually on the
+`output` branch, not by the test suite.
+
+### Verification
+`ruff check` clean, 95/95 tests pass. Checked against the real `last_fetch.json`
+on `output`: spans identical (2025-08-31 → 2026-09-04, 370 days), all twelve
+month labels identical, and the None-padding pattern identical cell for cell.
+Two new tests lock the span rule and the cell-for-cell date parity.
+
 ## 2026-09-04 — Wordmark mode
 
 ### What changed

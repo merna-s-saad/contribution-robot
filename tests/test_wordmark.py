@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import date
+from datetime import date, timedelta
 from itertools import pairwise
 from pathlib import Path
 from xml.etree import ElementTree
@@ -120,13 +120,59 @@ def test_lit_cells_spell_the_word(grid: gen.Grid) -> None:
     assert len(gen.lit_cells(grid)) == 88
 
 
-def test_word_grid_keeps_the_trailing_twelve_month_span(grid: gen.Grid) -> None:
-    """So the month labels match the contribution version and the pair stacks."""
+def test_word_grid_matches_githubs_calendar_span(grid: gen.Grid) -> None:
+    """Whole weeks, exactly as the API returns them.
+
+    GitHub does not truncate at exactly one year: the first column starts on
+    the Sunday on or before a year ago and is *complete*, and only the last
+    column is partial. Truncating to 365 days leaves column 0 with two cells
+    and shifts the first month label, which is precisely the drift this mode
+    exists to avoid.
+    """
     assert gen.grid_end_date(grid) == END_DAY
     days = [cell.day for column in grid for cell in column if cell]
     assert max(days) == END_DAY
-    assert (END_DAY - min(days)).days <= 365
+
+    # Column 0 is a full week; only the final column is cut short.
+    assert all(cell is not None for cell in grid[0])
+    assert all(cell is not None for column in grid[:-1] for cell in column)
+    assert grid[-1][END_DAY.isoweekday() % 7] is not None
+    assert all(
+        grid[-1][row] is None for row in range(END_DAY.isoweekday() % 7 + 1, gen.ROWS)
+    )
+
+    expected = (gen.COLS - 1) * 7 + (END_DAY.isoweekday() % 7) + 1
+    assert len(days) == expected == 370
+    assert min(days).isoweekday() % 7 == 0, "starts on a Sunday"
     assert len(gen.month_labels(grid)) >= 10, "a full year of month labels"
+
+
+def test_word_grid_lines_up_with_a_real_contribution_grid() -> None:
+    """The pair only stacks if both grids agree cell for cell on dates."""
+    weeks = []
+    day = date(2025, 8, 31)  # the Sunday GitHub would start this calendar on
+    while day <= END_DAY:
+        days = []
+        for row in range(gen.ROWS):
+            current = day + timedelta(days=row)
+            if current > END_DAY:
+                break
+            days.append(
+                {"date": current.isoformat(), "contributionCount": 1, "weekday": row}
+            )
+        weeks.append({"contributionDays": days})
+        day += timedelta(days=7)
+
+    contribution = gen.build_grid(weeks)
+    wordmark = gen.build_word_grid("MERNA", END_DAY)
+
+    assert gen.month_labels(contribution) == gen.month_labels(wordmark)
+    for col in range(gen.COLS):
+        for row in range(gen.ROWS):
+            left, right = contribution[col][row], wordmark[col][row]
+            assert (left is None) == (right is None), (col, row)
+            if left is not None:
+                assert left.day == right.day, (col, row)
 
 
 def test_a_word_too_wide_for_the_grid_is_rejected() -> None:

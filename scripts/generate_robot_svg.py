@@ -555,10 +555,13 @@ def build_word_grid(word: str, end_day: date) -> Grid:
         )
     offset = (COLS - len(columns)) // 2
 
-    # Mirror GitHub's ragged calendar: the last column stops at end_day and the
-    # first is truncated a year back, so partial weeks land in the same places.
+    # Mirror GitHub's calendar exactly, or the month labels drift out of step
+    # with the contribution SVG beside it. GitHub returns *whole* weeks: the
+    # first column starts on the Sunday on or before a year ago and is
+    # complete, and only the last column is partial, stopping at end_day. That
+    # is 370 days for a Friday end date, not 365 -- truncating to exactly a
+    # year leaves column 0 with two cells and shifts the first month label.
     last_sunday = end_day - timedelta(days=end_day.isoweekday() % 7)
-    first_day = end_day - timedelta(days=364)
 
     grid: Grid = []
     for col in range(COLS):
@@ -566,7 +569,7 @@ def build_word_grid(word: str, end_day: date) -> Grid:
         column: list[Cell | None] = []
         for row in range(ROWS):
             day = sunday + timedelta(days=row)
-            if day < first_day or day > end_day:
+            if day > end_day:
                 column.append(None)
                 continue
             lit = 0 <= col - offset < len(columns) and columns[col - offset][row]
