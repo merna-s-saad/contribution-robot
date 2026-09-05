@@ -287,11 +287,23 @@ This was raised with the user before implementation and approved (option 1).
   the cron queue behind each other instead of racing to publish. Not cancelled,
   so a hand-triggered run always finishes.
 - 10 minute job timeout, `permissions: contents: write`.
+- Renders **two** SVGs: `contribution-robot.svg` from the API, then
+  `wordmark-robot.svg` from `--word MERNA`. The wordmark step needs no token
+  and runs second, so an API failure still fails the run before anything is
+  published. The wordmark is regenerated daily rather than committed once
+  because its month labels track today's date — a frozen copy would drift out
+  of step with the contribution SVG within weeks.
 - Publishes the whole of `dist/` to a dedicated **`output`** branch via
-  `peaceiris/actions-gh-pages@v4`, which force-pushes it. That keeps a daily
-  commit of a regenerated ~73 KB file out of `main`'s history. The README will
-  point at the raw URL on `output`. `last_fetch.json` rides along, which is
-  intentional — it is public data and the fixture format.
+  `peaceiris/actions-gh-pages@v4`. That keeps a daily commit of regenerated
+  ~73 KB files out of `main`'s history. The README will point at the raw URLs
+  on `output`. `last_fetch.json` rides along, which is intentional — it is
+  public data and the fixture format.
+- **`keep_files: true`.** The action's default is `false`, which *deletes*
+  anything on the publish branch not present in `publish_dir` on that run. With
+  `force_orphan` left at `false` the branch keeps its history, so this is
+  file-level deletion rather than a branch rewrite. The trade is that nothing
+  on `output` is ever cleaned up, so a renamed output file leaves its old name
+  behind.
 - Auth: `CONTRIBUTION_TOKEN` (repo secret, `read:user`) for the GraphQL call;
   the built-in `GITHUB_TOKEN` for the publish step.
 - **No failure fallback, on purpose.** The generator exits 2/3/4 on a missing

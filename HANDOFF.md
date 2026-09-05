@@ -34,19 +34,24 @@ Nothing is half-finished in the working tree.
 None. One thing is simply unavailable: no `GITHUB_TOKEN` was present, so the
 live fetch has never actually run.
 
-## Wordmark mode is in but not wired into anything
+## Both SVGs are published daily
 
-`--word MERNA` works and is tested, but the daily workflow does not generate it.
-If you want both SVGs on the `output` branch, add a second render step before
-the publish step:
+The workflow renders the contribution SVG and then the wordmark, and publishes
+`dist/` to `output`. The wordmark step needs no token, so it cannot fail the way
+the API step can — and it runs after the API step, so a token failure still
+fails the run before anything is published.
 
-```yaml
-- name: Render the wordmark
-  run: python scripts/generate_robot_svg.py --username merna-s-saad
-       --word MERNA --out dist/wordmark-robot.svg
-```
+The wordmark is **regenerated every run rather than committed once**, even
+though its letters never change. `build_word_grid` stamps cells with today's
+date, so its month labels track the calendar exactly like the contribution
+SVG's. A committed copy would freeze those labels and drift out of step within
+weeks, defeating the reason the labels are kept.
 
-It needs no token, so it cannot fail the way the API step can.
+`keep_files: true` is set on the publish step. Without it,
+`peaceiris/actions-gh-pages` deletes anything on `output` that is not in
+`dist/` on that run — so a file added to that branch by hand would disappear on
+the next cron. Note the trade: nothing on `output` is ever cleaned up now, so a
+renamed output file would leave its old name behind.
 
 ## Next priorities
 
