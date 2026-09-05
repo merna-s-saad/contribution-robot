@@ -3,7 +3,7 @@
 updated-at: 2026-09-04
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 55 tests, ~0.2s
+.venv/bin/python -m pytest tests/ -q      # 94 tests, ~0.2s
 ruff check scripts/ tests/
 ```
 
@@ -22,6 +22,12 @@ No network is touched by any test. `requests` is imported lazily inside
 | Sprite | all six symbols present, one shared viewBox, no hex literals, mini drops the chest panel and thickens strokes, mirror is in-place and never vertical, `robot_use` centres on its point |
 | SVG | well-formed XML, viewBox with no width/height, no script/`javascript:`/`on*=`, title+desc+role, palette defined once as custom properties and no hex outside `<style>`, one animated rect per visited cell, counter is a strictly increasing stack, one particle per scoring cell, every animation shares the 24s duration, loops forever |
 | CLI | fixture render writes no `last_fetch.json` and never calls the API, output under 150 KB, missing token → exit 2 with a readable message, missing fixture → exit 4, bad API payloads raise, empty calendar rejected, a zero-contribution year still renders |
+| Font (`test_wordmark.py`) | the five MERNA glyphs match the brief character for character, all 26 letters + space are 5×7 and binary, `layout` puts one blank column between letters and none at the ends, `width` agrees with `layout`, case-insensitive, empty word, unsupported characters raise |
+| Wordmark grid | same 53×7 shape as a contribution grid, word centred to within a column, lit cells spell the word exactly (88 for MERNA), trailing-12-month dates preserved so month labels match, over-wide words rejected |
+| Wordmark path | **every glyph cell is reached** (also for A/HELLO/WXYZ/III), 8-way connected with no hops, no repeated cells, leads in and out by 2 columns, deterministic, blank word doesn't crash |
+| Wordmark timing | 20–25s, nothing dwells, every step the same length, gait still alternates stand/step and never uses the grab pose |
+| Wordmark render | well-formed and scriptless, counter + particles + `v` keyframes all absent, same viewBox and same Mon/Wed/Fri and month labels as contribution mode, letters start at `--empty` and brighten to `--l4` with no outline, only glyph cells animate (gaps are walked but not lit), the finished word holds past `RUN_SECONDS` before resetting, deterministic and under 150 KB |
+| Mode isolation | `--word` never touches the network and caches no payload, a bad word exits 4 with a readable message, and rendering without `--word` still produces the counter and the darkening style |
 
 ## Gaps
 

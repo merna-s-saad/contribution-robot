@@ -17,6 +17,7 @@ commits. No runtime, no server, no JavaScript in the output.
 | CLI | `scripts/generate_robot_svg.py` → `main()` | `--username --token --out --fixture` |
 | Library | `render_svg(grid, username, year_total) -> str` | pure; no I/O |
 | Sprite | `scripts/robot_sprite.py` → `ROBOT_DEFS`, `robot_use()` | imported by the generator |
+| Wordmark | `--word MERNA` → `build_word_grid` + `build_word_path` | skips the API entirely |
 
 ## Data flow
 
@@ -42,7 +43,9 @@ parse_args
 |---|---|
 | `scripts/generate_robot_svg.py` | everything except the sprite art: fetch, normalise, path, timeline, CSS, SVG assembly, CLI |
 | `scripts/robot_sprite.py` | 6 `<symbol>` poses + `robot_use()`; art only, no timing logic |
-| `tests/test_generate_robot_svg.py` | 55 tests, grouped by section comment |
+| `scripts/grid_font.py` | 5x7 bitmap font, A-Z + space, `layout()`; no knowledge of the grid or the robot |
+| `tests/test_generate_robot_svg.py` | 55 tests for contribution mode, grouped by section comment |
+| `tests/test_wordmark.py` | 39 tests for the font and wordmark mode |
 | `tests/fixtures/sample_calendar.json` | 53 weeks, deliberately partial first/last week, active from column 0, 742 contributions |
 | `tests/fixtures/late_start_calendar.json` | same shape but dead until column 16, so the start-column logic has something to bite on; 818 contributions |
 | `requirements.txt` | `requests` (live fetch only; lazily imported) |
@@ -69,6 +72,8 @@ sprite pose timeline, SVG helpers, rendering, CLI.
 | Why is the walk shaped like that? | `build_path` docstring (the pacing gate) |
 | Why doesn't it start at column 0? | `start_column` docstring |
 | Why is the pace different per calendar? | `target_cells` + the Timing block |
+| Why does the wordmark sweep full columns? | `build_word_path` docstring |
+| What differs between the two modes? | `RenderMode`, and its two instances |
 | Why per-element keyframes not `animation-delay`? | `render_style` docstring |
 | Why do collected cells name their idle colour? | `render_style`, cell keyframe loop |
 | How long does it run? | `RUN_SECONDS` / `CYCLE_SECONDS` in the Timing block |

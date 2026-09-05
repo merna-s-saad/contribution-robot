@@ -128,6 +128,68 @@ On `late_start_calendar.json` (dead until column 16): starts at column 14,
 55 cells, never goes left of 14, ends at column 52, base step 0.214s — 36%
 slower — collects 363 of 818.
 
+## Wordmark mode (`--word MERNA`)
+
+A second mode on the same generator, not a separate script. `--word` skips the
+GraphQL fetch entirely and synthesises the grid from `scripts/grid_font.py`.
+
+- **Font.** 5×7 bitmaps, A–Z plus space, one blank column between letters and
+  none at the ends. `layout(word)` returns columns of 7 booleans. Up to 8
+  letters fit in 53 columns. MERNA is 29 columns, centred at 12–40, 88 lit
+  cells.
+- **Dates are still real.** `build_word_grid` mirrors GitHub's ragged calendar
+  over the same trailing-12-month span, so month labels and Mon/Wed/Fri render
+  identically and the two SVGs stack in a README as a matched pair. Same
+  viewBox, so they align.
+- **The robot lights the word up.** Letters start at `--empty` and a collected
+  cell brightens to `--l4`, the inverse of contribution mode where collecting
+  darkens to `--collected`. Chosen because a wordmark that gets progressively
+  *erased* is backwards.
+- **Only glyph cells animate.** The robot walks the gaps between letters, but
+  lighting those would smear the word, so pass-over cells stay dark.
+- **The finished word holds.** `WORDMARK_MODE.reset_at` is 23s, not
+  `RUN_SECONDS`. With the contribution setting the word completed at t=22.0 and
+  began fading in the same instant — the payoff frame never existed.
+- **No counter, no particles.** Nothing to count; a number ticking up on
+  decorative cells would be misleading.
+- **Dwell off.** Every letter cell carries identical weight, so the
+  top-quartile rule would mark all of them, triple the step count and roughly
+  halve the pace. The grab pose therefore never fires in this mode.
+
+`RenderMode` carries the four things that differ (`collect_fill`, `outline`,
+`counter`, `dwell`, `reset_at`); everything else — timeline, gait, pose
+segments, sprite, CSS layer — is shared code.
+
+### Why the wordmark walk is a separate path function
+
+`build_word_path` is a boustrophedon: left to right, sweeping every column that
+contains a glyph pixel through its **full height**, alternating direction so
+each column's exit row is one step from the next column's entry. Blank gap
+columns are crossed at whatever row the robot is on.
+
+Two failed attempts worth not repeating:
+
+1. **Greedy `build_path` reused as-is** reaches only 42–85 of 88 cells
+   depending on tuning, and the higher numbers cost a 1.4–2.6× speed-up. The
+   wander cannot guarantee coverage: glyphs like `E` have isolated single-pixel
+   rows with no lit neighbour in the adjacent row.
+2. **Sweeping only each column's lit range**, routing between columns with BFS,
+   reached 72/88 and then deadlocked. Two distinct bugs: a shortest 8-way path
+   between two cells in the same column can detour diagonally *out* of the
+   column and back, skipping the cells in between; and if the previous column's
+   exit row lands strictly inside the next column's lit range, the robot must
+   cover cells on both sides of its entry and every route back is through cells
+   it has already walked.
+
+Full-height sweeps cost seven cells per glyph column but make coverage a
+property of the construction rather than something to hope for.
+
+**Pace, stated plainly:** MERNA is a 183-cell walk over the same 22s, so the
+step is **0.120s** against contribution mode's 0.157s — about 1.3× brisker.
+That is the price of 88/88 coverage and it was accepted knowingly. A very short
+word is the opposite problem: `--word A` is 39 cells, i.e. 0.564s per step,
+which looks becalmed.
+
 ## Timing
 
 `RUN_SECONDS = 22` walking + `SETTLE_SECONDS = 2` → `CYCLE_SECONDS = 24`,

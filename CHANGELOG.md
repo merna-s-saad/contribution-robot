@@ -1,5 +1,50 @@
 # CHANGELOG
 
+## 2026-09-04 — Wordmark mode
+
+### What changed
+- `scripts/grid_font.py` (new). 5×7 bitmap font, A–Z plus space, `layout()`,
+  `width()`. The five MERNA glyphs are exactly as specified.
+- `--word MERNA` on the existing generator. Skips the GraphQL fetch, builds the
+  grid from the font, centres the word, keeps the real trailing-12-month dates
+  so the month and Mon/Wed/Fri labels match the contribution version, and keeps
+  the same viewBox so the two stack as a matched pair. Counter and particles
+  dropped.
+- `RenderMode` carries the five things that differ between modes; the timeline,
+  gait, pose segments, sprite and CSS layer are shared unchanged.
+- `build_word_path`: a deterministic boustrophedon that reaches **all 88** glyph
+  cells, 8-way connected, no repeats, no teleporting.
+- `tests/test_wordmark.py` (new). 39 tests (55 → 94 total).
+
+### Decisions
+- **Robot lights the word up** rather than darkening it: letters start at
+  `--empty`, collected brightens to `--l4`. Contribution mode's darkening
+  behaviour would progressively erase the wordmark.
+- **Dwell off in wordmark mode.** Uniform letter weights make the top-quartile
+  rule select every cell, tripling units and halving the pace.
+- **Full-height column sweeps.** Sweeping only each column's lit range reaches
+  72/88 and then deadlocks; full-height sweeps make coverage structural.
+- **Pace is 0.120s/step against contribution mode's 0.157s** — 1.3× brisker,
+  the cost of guaranteeing 88/88. Reported rather than applied silently.
+- Palette untouched, as instructed.
+
+### Bugs found and fixed
+- First serpentine attempt reached 72/88: BFS between two cells in the same
+  column takes an equal-length diagonal detour *out* of the column, skipping
+  the cells in between.
+- Second attempt deadlocked entirely ("no unvisited route to column 13"): after
+  a full sweep the robot is walled in by its own trail and can only leave via a
+  single step from its current row.
+- The finished word was never held — cells began fading at t=22.0, the instant
+  the last one lit. `WORDMARK_MODE.reset_at` is now 23s.
+
+### Verification
+`ruff check` clean, 94/94 tests pass. `dist/contribution-robot.svg` is
+byte-identical to before (sha256 `898304ba…`), so contribution mode is provably
+untouched. Wordmark verified in headless Chrome by seeking the clock: 0/88 lit
+at t=0, 45/88 at t=11s, **88/88 at t=22.1s and still 88/88 at t=22.9s**, back to
+0 at t=23.8s. 62.7 KB.
+
 ## 2026-09-04 — Skip a dead lead-in; scale the pace to the active span
 
 ### What changed

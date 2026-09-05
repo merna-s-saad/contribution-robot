@@ -34,6 +34,20 @@ Nothing is half-finished in the working tree.
 None. One thing is simply unavailable: no `GITHUB_TOKEN` was present, so the
 live fetch has never actually run.
 
+## Wordmark mode is in but not wired into anything
+
+`--word MERNA` works and is tested, but the daily workflow does not generate it.
+If you want both SVGs on the `output` branch, add a second render step before
+the publish step:
+
+```yaml
+- name: Render the wordmark
+  run: python scripts/generate_robot_svg.py --username merna-s-saad
+       --word MERNA --out dist/wordmark-robot.svg
+```
+
+It needs no token, so it cannot fail the way the API step can.
+
 ## Next priorities
 
 1. **Trigger the workflow by hand** from the Actions tab (`workflow_dispatch`)
