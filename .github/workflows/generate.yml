@@ -49,6 +49,18 @@ jobs:
             --token ${{ secrets.CONTRIBUTION_TOKEN }} \
             --out dist/contribution-robot.svg
 
+      - name: Render the wordmark
+        # No token needed -- this is drawn from the bundled 5x7 font, not the
+        # API. It is regenerated every run rather than committed once because
+        # its month labels track the current date: a frozen copy would drift
+        # out of step with the contribution SVG beside it within weeks, which
+        # is the whole reason the labels are there.
+        run: |
+          python scripts/generate_robot_svg.py \
+            --username merna-s-saad \
+            --word MERNA \
+            --out dist/wordmark-robot.svg
+
       - name: Stamp the run date
         id: stamp
         run: echo "date=$(date -u +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
@@ -59,4 +71,8 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: output
           publish_dir: ./dist
+          # Without this the action deletes anything on the output branch that
+          # is not in dist/ on this run, so any file added to that branch by
+          # hand would vanish on the next cron.
+          keep_files: true
           commit_message: "build: regenerate contribution robot ${{ steps.stamp.outputs.date }}"
