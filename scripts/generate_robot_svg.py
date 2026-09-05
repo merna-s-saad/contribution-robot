@@ -24,14 +24,16 @@ import random
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
 try:  # running as a script: scripts/ is already on sys.path
+    import grid_font
     from robot_sprite import MINI_SYMBOLS, ROBOT_DEFS, robot_use
 except ImportError:  # imported as scripts.robot_sprite from the repo root
+    from scripts import grid_font
     from scripts.robot_sprite import MINI_SYMBOLS, ROBOT_DEFS, robot_use
 
 # --------------------------------------------------------------------------
@@ -158,6 +160,45 @@ class GeneratorError(Exception):
 # --------------------------------------------------------------------------
 # Data model
 # --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RenderMode:
+    """What "collecting" a cell means, which differs between the two modes.
+
+    In contribution mode the robot takes commits, so a collected cell darkens
+    to ``--collected`` and gains an outline. In wordmark mode there is nothing
+    to take -- the robot is lighting the letters up -- so a collected cell goes
+    from ``--empty`` to the brightest level, and there is no counter to feed.
+    """
+
+    collect_fill: str
+    outline: bool
+    counter: bool
+    dwell: bool
+    reset_at: float  # when collected cells start returning to their idle colour
+
+
+CONTRIBUTION_MODE = RenderMode(
+    collect_fill="var(--collected)",
+    outline=True,
+    counter=True,
+    dwell=True,
+    reset_at=RUN_SECONDS,
+)
+# Dwell is off: every letter cell carries the same weight, so the top-quartile
+# rule would mark all of them and triple the step count, roughly halving the
+# pace. Nothing about the wordmark is "worth lingering on" more than the rest.
+# The finished word is the payoff, so it holds through the settle and only
+# fades over the last second. Contribution mode starts its reset at t=22, which
+# would fade the wordmark the instant the final letter cell lit up.
+WORDMARK_MODE = RenderMode(
+    collect_fill="var(--l4)",
+    outline=False,
+    counter=False,
+    dwell=False,
+    reset_at=CYCLE_SECONDS - RESET_SECONDS,
+)
 
 
 @dataclass(frozen=True)
@@ -499,9 +540,110 @@ def _nearest_unvisited(
     return None
 
 
-def build_timeline(grid: Grid, path: Sequence[tuple[int, int]]) -> list[Step]:
+def build_word_grid(word: str, end_day: date) -> Grid:
+    """A 53x7 grid whose lit cells spell ``word``, centred on the canvas.
+
+    Cells still carry real dates from the same trailing-12-month span the
+    contribution calendar uses, so the month and weekday labels render exactly
+    as they do in contribution mode and the two SVGs read as a matched pair.
+    """
+    columns = grid_font.layout(word.upper())
+    if len(columns) > COLS:
+        raise GeneratorError(
+            f"{word!r} needs {len(columns)} columns but the grid is only {COLS} "
+            f"wide. Use at most {(COLS + 1) // (grid_font.GLYPH_WIDTH + 1)} letters."
+        )
+    offset = (COLS - len(columns)) // 2
+
+    # Mirror GitHub's ragged calendar: the last column stops at end_day and the
+    # first is truncated a year back, so partial weeks land in the same places.
+    last_sunday = end_day - timedelta(days=end_day.isoweekday() % 7)
+    first_day = end_day - timedelta(days=364)
+
+    grid: Grid = []
+    for col in range(COLS):
+        sunday = last_sunday - timedelta(days=(COLS - 1 - col) * 7)
+        column: list[Cell | None] = []
+        for row in range(ROWS):
+            day = sunday + timedelta(days=row)
+            if day < first_day or day > end_day:
+                column.append(None)
+                continue
+            lit = 0 <= col - offset < len(columns) and columns[col - offset][row]
+            column.append(Cell(day=day, count=1 if lit else 0, level=4 if lit else 0))
+        grid.append(column)
+    return grid
+
+
+def lit_cells(grid: Grid) -> set[tuple[int, int]]:
+    """Every cell the wordmark wants the robot to reach."""
+    return {
+        (col, row)
+        for col in range(COLS)
+        for row in range(ROWS)
+        if count_at(grid, col, row) > 0
+    }
+
+
+def build_word_path(grid: Grid) -> list[tuple[int, int]]:
+    """A connected walk that reaches every lit cell of the wordmark.
+
+    Boustrophedon: work left to right, sweeping each column that contains any
+    glyph pixel through its **full height**, alternating direction so the exit
+    row of one column is one step from the entry row of the next. Columns with
+    nothing in them (the gaps between letters) are crossed at whatever row the
+    robot is already on, so the letters cost seven cells each and the gaps cost
+    one.
+
+    Sweeping the full height rather than just each column's lit range is what
+    makes the coverage a guarantee. A range-only sweep strands the robot
+    whenever the previous column's exit row lands *inside* the next column's
+    range: it would have to cover cells on both sides of its entry point, and
+    the only routes back are through cells it has already walked.
+
+    Fully deterministic -- no RNG -- because the coverage guarantee is the
+    point and a seeded tie-break could only weaken it. Cells the robot merely
+    passes over are not lit; only glyph cells animate, so the connective walks
+    across the gaps do not smear the word.
+    """
+    targets = lit_cells(grid)
+    if not targets:
+        return [(0, 0)]
+
+    lit_columns = sorted({col for col, _ in targets})
+    first_col, last_col = lit_columns[0], lit_columns[-1]
+    lit_set = set(lit_columns)
+
+    row = 0
+    path: list[tuple[int, int]] = []
+
+    # Lead-in: walk in from a couple of blank columns, mirroring the
+    # contribution version's approach to the first active column.
+    for col in range(max(0, first_col - LEAD_IN_COLS), first_col):
+        path.append((col, row))
+
+    descending = True
+    for col in range(first_col, last_col + 1):
+        if col in lit_set:
+            rows = range(ROWS) if descending else range(ROWS - 1, -1, -1)
+            path.extend((col, r) for r in rows)
+            row = ROWS - 1 if descending else 0
+            descending = not descending
+        else:
+            path.append((col, row))  # blank gap: cross it, don't sweep it
+
+    # Lead-out, mirroring the lead-in.
+    for col in range(last_col + 1, min(COLS, last_col + 1 + LEAD_IN_COLS)):
+        path.append((col, row))
+
+    return path
+
+
+def build_timeline(
+    grid: Grid, path: Sequence[tuple[int, int]], *, allow_dwell: bool = True
+) -> list[Step]:
     """Assign every path cell a slot so the whole walk fills RUN_SECONDS."""
-    threshold = dwell_threshold(grid)
+    threshold = dwell_threshold(grid) if allow_dwell else 0
     dwells = [bool(threshold and count_at(grid, c, r) >= threshold) for c, r in path]
     total_units = sum(3.0 if d else 1.0 for d in dwells)
     base = RUN_SECONDS / total_units
@@ -662,6 +804,7 @@ def opacity_keyframes(name: str, windows: Sequence[tuple[float, float]]) -> str:
 def render_style(
     steps: Sequence[Step],
     collected: Sequence[tuple[int, Step, int]],
+    mode: RenderMode = CONTRIBUTION_MODE,
 ) -> str:
     """Variables, classes, and the shared/robot keyframes.
 
@@ -681,8 +824,13 @@ def render_style(
         ".l0{fill:var(--empty)}.l1{fill:var(--l1)}.l2{fill:var(--l2)}"
         ".l3{fill:var(--l3)}.l4{fill:var(--l4)}"
     )
+    outline = (
+        "stroke:var(--collected-edge);stroke-width:1;stroke-opacity:0;"
+        if mode.outline
+        else ""
+    )
     lines.append(
-        ".col{stroke:var(--collected-edge);stroke-width:1;stroke-opacity:0;"
+        f".col{{{outline}"
         f"animation-duration:{num(CYCLE_SECONDS)}s;animation-iteration-count:infinite;"
         "animation-timing-function:ease-out}"
     )
@@ -731,16 +879,18 @@ def render_style(
     # The idle colour has to be named explicitly: `fill: inherit` would take
     # the parent group's fill (black) rather than the cell's own level class,
     # because an animation overrides the class for the whole cycle.
-    reset_start = RUN_SECONDS
-    reset_end = min(CYCLE_SECONDS, RUN_SECONDS + RESET_SECONDS)
+    reset_start = mode.reset_at
+    reset_end = min(CYCLE_SECONDS, reset_start + RESET_SECONDS)
+    edge_off, edge_on = ("stroke-opacity:0", "stroke-opacity:1") if mode.outline else ("", "")
     for index, step, level in collected:
         idle = "var(--empty)" if level == 0 else f"var(--l{level})"
         flip = min(step.arrive + COLLECT_SECONDS, reset_start)
         lines.append(
             f"@keyframes k{index}{{"
-            f"0%,{pct(step.arrive)}{{fill:{idle};stroke-opacity:0}}"
-            f"{pct(flip)},{pct(reset_start)}{{fill:var(--collected);stroke-opacity:1}}"
-            f"{pct(reset_end)},100%{{fill:{idle};stroke-opacity:0}}}}"
+            f"0%,{pct(step.arrive)}{{fill:{idle}{';' + edge_off if edge_off else ''}}}"
+            f"{pct(flip)},{pct(reset_start)}{{fill:{mode.collect_fill}"
+            f"{';' + edge_on if edge_on else ''}}}"
+            f"{pct(reset_end)},100%{{fill:{idle}{';' + edge_off if edge_off else ''}}}}}"
         )
     return "\n".join(lines)
 
@@ -776,18 +926,28 @@ def render_robot(steps: Sequence[Step]) -> tuple[str, str]:
     return group, "\n".join(keyframes)
 
 
-def render_svg(grid: Grid, username: str, year_total: int) -> str:
-    rng = random.Random(grid_end_date(grid).isoformat())
-    path = build_path(grid, rng)
-    steps = build_timeline(grid, path)
+def render_svg(
+    grid: Grid, username: str, year_total: int, word: str | None = None
+) -> str:
+    mode = WORDMARK_MODE if word else CONTRIBUTION_MODE
+
+    if word:
+        # Deterministic serpentine, so every letter cell is reached.
+        path = build_word_path(grid)
+    else:
+        path = build_path(grid, random.Random(grid_end_date(grid).isoformat()))
+    steps = build_timeline(grid, path, allow_dwell=mode.dwell)
 
     def level_at(col: int, row: int) -> int:
         cell = grid[col][row]
         return cell.level if cell else 0
 
+    # In wordmark mode only glyph cells animate. The robot walks the gaps
+    # between letters, but lighting those up would smear the word.
     collected = [
-        (index, step, level_at(step.col, step.row))
+        (index, step, 0 if word else level_at(step.col, step.row))
         for index, step in enumerate(steps)
+        if not word or step.count > 0
     ]
     step_by_position = {(step.col, step.row): index for index, step, _ in collected}
 
@@ -797,7 +957,7 @@ def render_svg(grid: Grid, username: str, year_total: int) -> str:
     values: list[int] = [0]
     starts: list[float] = [0.0]
     running = 0
-    for _, step, _level in collected:
+    for _, step, _level in collected if mode.counter else ():
         if step.count <= 0:
             continue
         running += step.count
@@ -811,15 +971,19 @@ def render_svg(grid: Grid, username: str, year_total: int) -> str:
             f'animation-delay:{num(step.arrive)}s"/>'
         )
 
-    counter_windows = [
-        (start, starts[i + 1] if i + 1 < len(starts) else CYCLE_SECONDS)
-        for i, start in enumerate(starts)
-    ]
+    counter_windows = (
+        [
+            (start, starts[i + 1] if i + 1 < len(starts) else CYCLE_SECONDS)
+            for i, start in enumerate(starts)
+        ]
+        if mode.counter
+        else []
+    )
 
     robot, pose_keyframes = render_robot(steps)
     style = "\n".join(
         [
-            render_style(steps, collected),
+            render_style(steps, collected, mode),
             "\n".join(
                 opacity_keyframes(f"v{i}", [window])
                 for i, window in enumerate(counter_windows)
@@ -833,7 +997,8 @@ def render_svg(grid: Grid, username: str, year_total: int) -> str:
     for col in range(COLS):
         for row in range(ROWS):
             cell = grid[col][row]
-            level = cell.level if cell else 0
+            # Wordmark cells all start dark; the robot is what lights them.
+            level = 0 if word else (cell.level if cell else 0)
             index = step_by_position.get((col, row))
             classes = f"l{level}" + (" col" if index is not None else "")
             extra = f' style="animation-name:k{index}"' if index is not None else ""
@@ -855,28 +1020,39 @@ def render_svg(grid: Grid, username: str, year_total: int) -> str:
     )
 
     # --- counter ---------------------------------------------------------
-    counter = [
-        (
+    # Dropped in wordmark mode: there are no contributions, and a number
+    # ticking up on decorative cells would be misleading.
+    counter: list[str] = []
+    if mode.counter:
+        counter.append(
             f'<text class="pre" x="{num(GRID_X)}" y="{num(COUNTER_Y)}">'
             f"commits collected</text>"
         )
-    ]
-    counter += [
-        f'<text class="cv" x="{num(counter_x)}" y="{num(COUNTER_Y)}" '
-        f'style="animation-name:v{i}">{value:,}</text>'
-        for i, value in enumerate(values)
-    ]
+        counter += [
+            f'<text class="cv" x="{num(counter_x)}" y="{num(COUNTER_Y)}" '
+            f'style="animation-name:v{i}">{value:,}</text>'
+            for i, value in enumerate(values)
+        ]
 
-    total_collected = values[-1]
     safe_user = escape(username)
-    title = f"{safe_user}&#8217;s contribution robot"
-    desc = (
-        f"An animated GitHub contribution grid for {safe_user}. "
-        f"The year&#8217;s total is {year_total:,} contributions. "
-        f"A small robot wanders {len(steps)} of the {COLS * ROWS} cells and "
-        f"collects {total_collected:,} contributions over {num(RUN_SECONDS)} "
-        "seconds, then the animation resets and repeats."
-    )
+    if word:
+        safe_word = escape(word.upper())
+        title = f"{safe_word} drawn by a contribution robot"
+        desc = (
+            f"A contribution-grid wordmark spelling {safe_word}. A small robot "
+            f"walks {len(steps)} cells over {num(RUN_SECONDS)} seconds, lighting "
+            f"all {len(collected)} letter cells as it reaches them, then the "
+            "animation resets and repeats."
+        )
+    else:
+        title = f"{safe_user}&#8217;s contribution robot"
+        desc = (
+            f"An animated GitHub contribution grid for {safe_user}. "
+            f"The year&#8217;s total is {year_total:,} contributions. "
+            f"A small robot wanders {len(steps)} of the {COLS * ROWS} cells and "
+            f"collects {values[-1]:,} contributions over {num(RUN_SECONDS)} "
+            "seconds, then the animation resets and repeats."
+        )
 
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
@@ -924,6 +1100,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Render from a saved JSON payload instead of calling the API",
     )
+    parser.add_argument(
+        "--word",
+        default=None,
+        help=(
+            "Draw a wordmark (A-Z and space) instead of contribution data. "
+            "Skips the API entirely; the robot lights the letters as it walks."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -948,11 +1132,21 @@ def load_payload(args: argparse.Namespace) -> tuple[dict[str, Any], bool]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    payload: dict[str, Any] = {}
+    live = False
     try:
-        payload, live = load_payload(args)
-        weeks, year_total = extract_weeks(payload)
-        grid = build_grid(weeks)
-        svg = render_svg(grid, args.username, year_total)
+        if args.word:
+            # No contribution data is involved, so the API is skipped entirely.
+            grid = build_word_grid(args.word, datetime.now(tz=UTC).date())
+            svg = render_svg(grid, args.username, 0, word=args.word)
+        else:
+            payload, live = load_payload(args)
+            weeks, year_total = extract_weeks(payload)
+            grid = build_grid(weeks)
+            svg = render_svg(grid, args.username, year_total)
+    except grid_font.UnsupportedCharacter as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return EXIT_DATA
     except GeneratorError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return exc.code
