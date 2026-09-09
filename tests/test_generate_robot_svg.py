@@ -31,6 +31,11 @@ def _walk(grid: gen.Grid) -> list[tuple[int, int]]:
     return gen.build_path(grid, random.Random(gen.grid_end_date(grid).isoformat()))
 
 
+def _trip(grid: gen.Grid) -> gen.Timeline:
+    rng = random.Random(gen.grid_end_date(grid).isoformat())
+    return gen.build_round_trip(grid, gen.build_path(grid, rng), rng)
+
+
 def _empty_grid(active_from: int | None) -> gen.Grid:
     """A grid whose columns before ``active_from`` have no contributions."""
     weeks = [
@@ -134,14 +139,25 @@ def test_levels_span_the_palette(grid: gen.Grid) -> None:
 # --------------------------------------------------------------------- path
 
 
-def test_path_is_a_valid_non_repeating_walk(grid: gen.Grid) -> None:
+def test_path_is_a_valid_walk(grid: gen.Grid) -> None:
     rng = random.Random(gen.grid_end_date(grid).isoformat())
     path = gen.build_path(grid, rng)
+    start = gen.start_column(grid)
 
-    assert len(path) == len(set(path)), "the robot must never revisit a cell"
-    assert path[0][0] == 0, "starts at the left edge"
+    assert path[0][0] == start, "starts at the density point"
     assert path[-1][0] == gen.COLS - 1, "crosses to the right edge"
-    assert all(0 <= c < gen.COLS and 0 <= r < gen.ROWS for c, r in path)
+    assert all(start <= c < gen.COLS and 0 <= r < gen.ROWS for c, r in path)
+    # Retracing is a rare connectivity fallback, never the norm.
+    repeats = len(path) - len(set(path))
+    assert repeats <= len(path) // 20, f"{repeats} retraced cells is too many"
+
+
+def test_a_boxed_in_walk_retraces_instead_of_teleporting() -> None:
+    """A denser walk traps itself; a visible jump is worse than a retrace."""
+    for fixture in (FIXTURE, LATE_FIXTURE):
+        path = _walk(_grid(fixture))
+        for (c1, r1), (c2, r2) in pairwise(path):
+            assert max(abs(c2 - c1), abs(r2 - r1)) == 1, "no hops, ever"
 
 
 def test_path_is_eight_way_connected(grid: gen.Grid) -> None:
@@ -182,12 +198,52 @@ def test_render_is_byte_identical_across_runs(grid: gen.Grid) -> None:
 
 
 @pytest.mark.parametrize("active_from", [0, 1, 2, 3, 14, 30])
-def test_start_backs_up_two_columns_from_the_first_active_one(
+def test_start_is_the_density_point_backed_up_by_the_lead_in(
     active_from: int,
 ) -> None:
+    """`_empty_grid` ramps counts upward, so the density point sits right."""
     grid = _empty_grid(active_from)
     assert gen.first_active_column(grid) == active_from
-    assert gen.start_column(grid) == max(0, active_from - gen.LEAD_IN_COLS)
+    dense = gen.dense_column(grid)
+    assert dense is not None
+    assert gen.start_column(grid) == max(
+        0, min(dense - gen.LEAD_IN_COLS, gen.COLS - gen.MIN_SPAN_COLS)
+    )
+    assert gen.start_column(grid) >= max(0, active_from - gen.LEAD_IN_COLS) or (
+        gen.COLS - gen.start_column(grid) >= gen.MIN_SPAN_COLS
+    )
+
+
+def test_density_point_keeps_most_of_the_year_ahead_of_it() -> None:
+    """The *latest* qualifying column, not the earliest -- see dense_column."""
+    grid = _empty_grid(0)
+    totals = gen.column_totals(grid)
+    year = sum(totals)
+    dense = gen.dense_column(grid)
+    assert sum(totals[dense:]) >= gen.DENSITY_SHARE * year
+    # One column further right would drop below the share.
+    assert sum(totals[dense + 1 :]) < gen.DENSITY_SHARE * year
+
+
+def test_the_skip_never_starves_the_walk_of_columns() -> None:
+    """A calendar with everything in the last few columns must not crawl."""
+    weeks = [
+        {
+            "contributionDays": [
+                {
+                    "date": "2024-01-07",
+                    "contributionCount": 200 if col >= gen.COLS - 3 else 0,
+                    "weekday": row,
+                }
+                for row in range(7)
+            ]
+        }
+        for col in range(gen.COLS)
+    ]
+    grid = gen.build_grid(weeks)
+    assert gen.dense_column(grid) > gen.COLS - gen.MIN_SPAN_COLS, "density wants far right"
+    start = gen.start_column(grid)
+    assert gen.COLS - start >= gen.MIN_SPAN_COLS, "but the span is floored"
 
 
 def test_a_completely_empty_grid_falls_back_to_column_zero() -> None:
@@ -219,26 +275,26 @@ def test_dead_columns_still_render_as_normal_cells() -> None:
 
 
 def test_shorter_span_walks_fewer_cells_at_a_slower_pace() -> None:
-    full, late = _grid(FIXTURE), _grid(LATE_FIXTURE)
-    assert gen.start_column(full) == 0 and gen.start_column(late) > 0
-
-    def base_step(grid: gen.Grid) -> float:
-        steps = gen.build_timeline(grid, _walk(grid))
-        normal = next(step for step in steps if not step.dwell)
-        return normal.depart - normal.arrive
-
-    assert len(_walk(late)) < len(_walk(full)), "shorter span, fewer cells"
-    assert base_step(late) > base_step(full), "and a more deliberate pace"
+    """Fewer cells over the same fixed 22s means a longer step."""
+    for narrow, wide in ((20, 0), (30, 10)):
+        assert gen.target_cells(narrow) < gen.target_cells(wide)
+        assert (
+            gen.RUN_SECONDS / gen.target_cells(narrow)
+            > gen.RUN_SECONDS / gen.target_cells(wide)
+        )
 
 
 def test_target_cells_scales_with_the_span_and_has_a_floor() -> None:
-    # A full-width calendar reproduces the original tuning exactly.
-    assert gen.target_cells(0) == gen.MIN_CELLS
+    assert gen.target_cells(0) == round(gen.CELLS_PER_COLUMN * gen.COLS)
     assert gen.target_cells(20) < gen.target_cells(0)
     # A tiny active region does not collapse to a handful of very long steps.
-    assert gen.target_cells(gen.COLS - 3) >= min(
-        gen.MIN_CELLS_FLOOR, 3 * gen.ROWS
-    )
+    assert gen.target_cells(gen.COLS - 3) >= min(gen.MIN_CELLS_FLOOR, 3 * gen.ROWS)
+
+
+def test_the_pace_lever_lands_the_outbound_step_near_three_tenths() -> None:
+    """CELLS_PER_COLUMN is tuned for ~0.30s on a 30-column active span."""
+    step = gen.RUN_SECONDS / gen.target_cells(gen.COLS - 30)
+    assert 0.26 <= step <= 0.34, step
 
 
 def test_late_start_render_still_meets_every_budget() -> None:
@@ -285,12 +341,11 @@ def test_top_quartile_cells_dwell_about_three_times_longer(grid: gen.Grid) -> No
 
 
 def test_pose_segments_tile_the_cycle_without_overlap(grid: gen.Grid) -> None:
-    rng = random.Random(gen.grid_end_date(grid).isoformat())
-    steps = gen.build_timeline(grid, gen.build_path(grid, rng))
-    segments = gen.build_pose_segments(steps)
+    trip = _trip(grid)
+    segments = gen.build_pose_segments(trip.steps, trip.cycle, trip.turn_index)
 
     assert segments[0][0] == 0.0
-    assert segments[-1][1] == pytest.approx(gen.CYCLE_SECONDS)
+    assert segments[-1][1] == pytest.approx(trip.cycle)
     for current, following in pairwise(segments):
         assert current[1] == pytest.approx(following[0]), "exactly one pose at a time"
     assert {pose for _, _, pose, _ in segments} == {"stand", "step", "grab"}
@@ -298,10 +353,16 @@ def test_pose_segments_tile_the_cycle_without_overlap(grid: gen.Grid) -> None:
 
 
 def test_grab_pose_covers_every_dwell_beat(grid: gen.Grid) -> None:
-    rng = random.Random(gen.grid_end_date(grid).isoformat())
-    steps = gen.build_timeline(grid, gen.build_path(grid, rng))
-    grabs = [(s, e) for s, e, pose, _ in gen.build_pose_segments(steps) if pose == "grab"]
-    for step in (s for s in steps if s.dwell):
+    trip = _trip(grid)
+    steps = trip.steps
+    grabs = [
+        (s, e)
+        for s, e, pose, _ in gen.build_pose_segments(
+            trip.steps, trip.cycle, trip.turn_index
+        )
+        if pose == "grab"
+    ]
+    for step in (s for s in steps if s.dwell and s is not steps[trip.turn_index]):
         assert any(
             start <= step.arrive + 1e-9 and end >= step.hold_until - 1e-9
             for start, end in grabs
@@ -318,6 +379,140 @@ def test_robot_turns_around_when_the_path_goes_left(grid: gen.Grid) -> None:
             assert facings[index] == -1
         elif delta > 0:
             assert facings[index] == 1
+
+
+# --------------------------------------------------------------- round trip
+
+
+def test_the_robot_walks_home_instead_of_snapping_back(grid: gen.Grid) -> None:
+    trip = _trip(grid)
+    outbound = [step for step in trip.steps if step.collecting]
+    home = [step for step in trip.steps if not step.collecting]
+
+    assert home, "there must be a return leg"
+    assert outbound[-1].col == gen.COLS - 1, "outbound reaches the right edge"
+    assert home[-1].col == gen.start_column(grid), "and walks back to the start"
+
+
+def test_the_whole_round_trip_is_connected(grid: gen.Grid) -> None:
+    """Including the junction at the turn -- no snap, no teleport."""
+    for first, second in pairwise(_trip(grid).steps):
+        distance = max(abs(second.col - first.col), abs(second.row - first.row))
+        assert distance == 1, ((first.col, first.row), (second.col, second.row))
+
+
+def test_the_return_leg_is_not_the_outbound_route_reversed(grid: gen.Grid) -> None:
+    trip = _trip(grid)
+    outbound = {(s.col, s.row) for s in trip.steps if s.collecting}
+    home = [(s.col, s.row) for s in trip.steps if not s.collecting]
+    shared = sum(1 for cell in home if cell in outbound)
+    assert shared < len(home) // 2, f"{shared}/{len(home)} shared reads as a retrace"
+
+
+def test_the_return_leg_collects_nothing(grid: gen.Grid) -> None:
+    trip = _trip(grid)
+    assert all(not step.collecting for step in trip.steps[trip.turn_index + 1 :])
+    # A cell walked twice is collected once, on first arrival.
+    collecting = [(s.col, s.row) for s in trip.steps if s.collecting]
+    assert len(collecting) == len(set(collecting))
+
+
+def test_the_counter_holds_its_final_value_through_the_walk_home(
+    svg: str, grid: gen.Grid
+) -> None:
+    trip = _trip(grid)
+    names = re.findall(r'style="animation-name:v(\d+)">([\d,]+)</text>', svg)
+    last_name, last_value = names[-1]
+
+    # The final value's keyframes turn it on and never turn it off, so it is
+    # still showing while the robot walks home and through the settle.
+    block = re.search(
+        rf"@keyframes v{last_name}\{{(.*)$", svg, re.MULTILINE
+    ).group(1)
+    assert "opacity:1" in block
+    assert block.count("opacity:0") == 1, "only the leading 0% stop, no close"
+
+    # It comes on as the outbound leg ends, not part way through the return.
+    on_at = float(re.search(r"([\d.]+)%\{opacity:1\}", block).group(1))
+    assert on_at / 100.0 * trip.cycle <= gen.RUN_SECONDS + 1e-6
+
+    # And the counter never changes again after that.
+    assert int(last_value.replace(",", "")) == max(
+        int(value.replace(",", "")) for _, value in names
+    )
+    assert trip.cycle > gen.RUN_SECONDS, "the cycle grew to fit the return"
+
+
+def test_collected_cells_stay_collected_until_the_robot_is_home(
+    grid: gen.Grid,
+) -> None:
+    trip = _trip(grid)
+    assert trip.reset_at == pytest.approx(trip.steps[-1].depart)
+    assert trip.reset_at > gen.RUN_SECONDS + gen.TURN_SECONDS
+
+
+def test_no_step_holds_right_up_to_its_departure(grid: gen.Grid) -> None:
+    """Equal hold and depart collide with the next step's arrival keyframe.
+
+    Two keyframes at the same percentage means the later one wins, so the
+    robot slides toward the next cell during what should be a still hold.
+    """
+    for step in _trip(grid).steps[:-1]:
+        assert step.hold_until < step.depart, (step.col, step.row)
+
+
+def test_the_turn_pauses_and_flips_facing(grid: gen.Grid) -> None:
+    trip = _trip(grid)
+    turn = trip.steps[trip.turn_index]
+    assert turn.depart - turn.arrive >= gen.TURN_SECONDS
+    assert turn.hold_until < turn.depart
+
+    segments = gen.build_pose_segments(trip.steps, trip.cycle, trip.turn_index)
+
+    def active(when: float) -> tuple[str, int]:
+        for start, end, pose, facing in segments:
+            if start <= when < end:
+                return pose, facing
+        raise AssertionError(f"nothing active at {when}")
+
+    # Standing still throughout, but facing outbound on arrival and homeward
+    # by the end of the pause. Sampled by time rather than by segment, because
+    # the first half merges with the stand segment that precedes it.
+    early = turn.arrive + 0.05
+    late = turn.hold_until - 0.05
+    assert active(early) == ("stand", 1), active(early)
+    assert active(late) == ("stand", -1), active(late)
+
+
+def test_the_return_is_brisker_than_the_outbound_walk(grid: gen.Grid) -> None:
+    trip = _trip(grid)
+    assert trip.return_step == pytest.approx(
+        trip.outbound_step / gen.RETURN_SPEEDUP, rel=1e-6
+    ) or trip.return_step < trip.outbound_step / gen.RETURN_SPEEDUP
+    assert trip.return_step < trip.outbound_step
+
+
+def test_the_outbound_walk_is_never_compressed(grid: gen.Grid) -> None:
+    """The return leg must not eat into the outbound 22 seconds."""
+    trip = _trip(grid)
+    outbound = [step for step in trip.steps if step.collecting]
+    assert outbound[-1].depart - gen.TURN_SECONDS == pytest.approx(gen.RUN_SECONDS)
+
+
+def test_the_whole_cycle_stays_under_thirty_five_seconds(grid: gen.Grid) -> None:
+    for fixture in (FIXTURE, LATE_FIXTURE):
+        trip = _trip(_grid(fixture))
+        assert trip.cycle <= gen.MAX_CYCLE_SECONDS, trip.cycle
+        assert trip.cycle > gen.RUN_SECONDS + gen.TURN_SECONDS
+
+
+def test_wordmark_mode_has_no_return_leg() -> None:
+    """The walk home belongs to the contribution robot only."""
+    from datetime import date as _date
+
+    word_grid = gen.build_word_grid("MERNA", _date(2026, 9, 4))
+    svg = gen.render_svg(word_grid, "merna-s-saad", 0, word="MERNA")
+    assert f"animation-duration:{gen.num(gen.WORDMARK_CYCLE)}s" in svg
 
 
 # ------------------------------------------------------------------- sprite
@@ -380,9 +575,13 @@ def test_robot_use_centres_the_sprite_on_the_given_point() -> None:
 
 
 def test_svg_stacks_one_use_per_pose_and_facing(svg: str, grid: gen.Grid) -> None:
-    rng = random.Random(gen.grid_end_date(grid).isoformat())
-    steps = gen.build_timeline(grid, gen.build_path(grid, rng))
-    keys = {(pose, facing) for _, _, pose, facing in gen.build_pose_segments(steps)}
+    trip = _trip(grid)
+    keys = {
+        (pose, facing)
+        for _, _, pose, facing in gen.build_pose_segments(
+            trip.steps, trip.cycle, trip.turn_index
+        )
+    }
     assert svg.count('class="rp"') == len(keys)
     for index in range(len(keys)):
         assert f"@keyframes rp{index}{{" in svg
@@ -465,7 +664,7 @@ def test_one_particle_per_scoring_cell(svg: str, grid: gen.Grid) -> None:
 def test_animations_share_one_duration_so_delays_stay_in_lockstep(svg: str) -> None:
     durations = set(re.findall(r"animation-duration:([\d.]+)s", svg))
     inline = set(re.findall(r"animation:\w+ ([\d.]+)s", svg))
-    assert durations | inline == {gen.num(gen.CYCLE_SECONDS)}
+    assert len(durations | inline) == 1, "every animation must share one duration"
 
 
 def test_animation_loops_forever(svg: str) -> None:

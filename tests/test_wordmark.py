@@ -240,7 +240,9 @@ def test_nothing_dwells_in_wordmark_mode(grid: gen.Grid) -> None:
 
 def test_the_gait_still_alternates_stand_and_step(grid: gen.Grid) -> None:
     steps = gen.build_timeline(grid, gen.build_word_path(grid), allow_dwell=False)
-    poses = {pose for _, _, pose, _ in gen.build_pose_segments(steps)}
+    poses = {
+        pose for _, _, pose, _ in gen.build_pose_segments(steps, gen.WORDMARK_CYCLE)
+    }
     assert {"stand", "step"} <= poses
     assert "grab" not in poses, "grab is the dwell pose; there are no dwells"
 
@@ -292,7 +294,7 @@ def test_only_glyph_cells_animate(svg: str, grid: gen.Grid) -> None:
 def test_the_finished_word_holds_before_it_resets(svg: str) -> None:
     """The payoff frame must last, not flash for an instant at t=22s."""
     assert gen.WORDMARK_MODE.reset_at > gen.RUN_SECONDS
-    hold = gen.pct(gen.WORDMARK_MODE.reset_at)
+    hold = gen.pct(gen.WORDMARK_MODE.reset_at, gen.WORDMARK_CYCLE)
     assert f",{hold}{{fill:var(--l4)}}" in svg
 
 
