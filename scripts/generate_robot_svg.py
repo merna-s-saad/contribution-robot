@@ -86,32 +86,45 @@ PALETTE: dict[str, str] = {
 # Timing
 # --------------------------------------------------------------------------
 
-RUN_SECONDS = 22.0  # robot is walking for this long
-SETTLE_SECONDS = 2.0  # everything holds, then resets
-CYCLE_SECONDS = RUN_SECONDS + SETTLE_SECONDS
+RUN_SECONDS = 22.0  # the outbound walk; fixed, never compressed
+SETTLE_SECONDS = 2.0  # wordmark mode only: hold, then reset
+WORDMARK_CYCLE = RUN_SECONDS + SETTLE_SECONDS
 MOVE_FRACTION = 0.55  # share of a base step spent translating between cells
 PARTICLE_SECONDS = 0.9
 COLLECT_SECONDS = 0.25  # how long a cell takes to flip to the collected colour
 RESET_SECONDS = 1.0
 GAIT_PERIOD = 0.4  # full stand -> step -> stand cycle while travelling
 
+# The walk home. The robot turns at the right edge, walks back over ground it
+# has already collected, then everything resets.
+TURN_SECONDS = 0.6  # pause at the right edge while it flips facing
+RETURN_SPEEDUP = 1.5  # return step is the outbound step divided by this
+ARRIVAL_SECONDS = 0.8  # short settle once it is home
+MAX_CYCLE_SECONDS = 35.0  # hard ceiling on the whole loop
+
 # --------------------------------------------------------------------------
 # Path generation
 # --------------------------------------------------------------------------
 
-MIN_CELLS = 78  # a straight march is 53; the extra length is the wander
 # Path length scales with the active span, so a short span means a slower,
-# more deliberate pace rather than the same sprint over fewer cells. Derived
-# from MIN_CELLS so a full-width calendar reproduces the old 78 exactly.
-CELLS_PER_COLUMN = MIN_CELLS / COLS
+# more deliberate pace rather than the same sprint over fewer cells. 2.24
+# cells per column puts the outbound step at ~0.30s on the current calendar:
+# a 30-column active span asks for 67 cells, the wander delivers 64, and the
+# five dwells push the unit count to 72 over the fixed 22s. Raise it for a
+# denser walk, not a longer one -- RUN_SECONDS never moves. Note the step is
+# 22s / *units*, and a dwell costs three units, so cells alone don't set it.
+CELLS_PER_COLUMN = 2.24
 MIN_CELLS_FLOOR = 24  # below this a single step gets long enough to look broken
 LEAD_IN_COLS = 2  # blank columns kept before the first active one
 GATE_SLACK = 2  # columns the walk may run ahead of its pace
-MAX_STEPS = 150
+MAX_STEPS = 260  # headroom for the denser walk plus the return leg
 LOOKAHEAD_COLS = 3
 BASE_DRIFT = 0.6
 JITTER = 0.15
 TRAP_PENALTY = 10.0  # steering away from cells that would dead-end the walk
+RETRACE_PENALTY = 0.6  # soft nudge away from the outbound route on the way home
+DENSITY_SHARE = 0.70  # the walk starts where this much of the year is still ahead
+MIN_SPAN_COLS = 30  # never skip so far that the walk has fewer columns than this
 
 GRAPHQL_URL = "https://api.github.com/graphql"
 QUERY = """
@@ -197,7 +210,7 @@ WORDMARK_MODE = RenderMode(
     outline=False,
     counter=False,
     dwell=False,
-    reset_at=CYCLE_SECONDS - RESET_SECONDS,
+    reset_at=WORDMARK_CYCLE - RESET_SECONDS,
 )
 
 
@@ -224,6 +237,7 @@ class Step:
     arrive: float  # seconds from the start of the cycle
     hold_until: float  # when it starts translating to the next cell
     depart: float  # == arrive of the next step
+    collecting: bool = True  # False on the walk home: it is not re-harvesting
 
 
 # --------------------------------------------------------------------------
@@ -402,6 +416,11 @@ def count_at(grid: Grid, col: int, row: int) -> int:
     return cell.count if cell else 0
 
 
+def column_totals(grid: Grid) -> list[int]:
+    """Contributions per column."""
+    return [sum(cell.count for cell in column if cell) for column in grid]
+
+
 def first_active_column(grid: Grid) -> int | None:
     """Index of the leftmost column with any contributions at all."""
     for col, column in enumerate(grid):
@@ -410,17 +429,48 @@ def first_active_column(grid: Grid) -> int | None:
     return None
 
 
+def dense_column(grid: Grid, share: float = DENSITY_SHARE) -> int | None:
+    """The furthest-right column that still has ``share`` of the year ahead of it.
+
+    Note this is the *latest* such column, not the earliest. Taken literally,
+    "the earliest column whose remaining span holds at least 70%" is always
+    column 0 -- the whole grid trivially holds 100% -- which would make the
+    robot walk more empty space, not less. The useful reading is to skip as far
+    right as possible while keeping most of the data still ahead.
+    """
+    totals = column_totals(grid)
+    year = sum(totals)
+    if year <= 0:
+        return None
+    remaining = year
+    best = 0
+    for col, total in enumerate(totals):
+        if remaining < share * year:
+            break
+        best = col
+        remaining -= total
+    return best
+
+
 def start_column(grid: Grid) -> int:
     """Where the robot enters the grid.
 
-    A calendar with a long dead stretch at the start would otherwise have the
-    robot trudging through empty columns for most of the animation. Skip to
-    just before the first real activity, keeping a couple of blank columns as
-    lead-in. Everything left of this still renders as normal cells -- the robot
-    simply never walks there.
+    Two things are traded off. Skipping a sparse opening stops the robot
+    trudging through a faint stretch for most of the animation. But skipping
+    too far leaves too few cells to fill the fixed 22s, and the walk crawls --
+    a calendar with 90% of its commits in the last five columns will push the
+    density point almost to the right edge. So the skip is capped so the active
+    span never falls below MIN_SPAN_COLS.
+
+    Everything left of the start still renders as normal cells; it is real data
+    and stays visible. The robot simply never walks there.
     """
-    first = first_active_column(grid)
-    return 0 if first is None else max(0, first - LEAD_IN_COLS)
+    if first_active_column(grid) is None:
+        return 0  # nothing anywhere: start at the left edge
+    dense = dense_column(grid)
+    if dense is None:
+        return 0
+    return max(0, min(dense - LEAD_IN_COLS, COLS - MIN_SPAN_COLS))
 
 
 def target_cells(start: int) -> int:
@@ -498,11 +548,12 @@ def build_path(grid: Grid, rng: random.Random) -> list[tuple[int, int]]:
             if nc <= gate and score > best_score:
                 best_score, best = score, (nc, nr)
 
-        # Ignore the gate rather than stall; hop only if truly boxed in.
-        best = best or loose or _nearest_unvisited(grid, visited, col, scale, start)
-        if best is None:
-            break
-
+        # Ignore the gate rather than stall. If genuinely boxed in, step back
+        # onto ground it has already walked: a denser walk traps itself often
+        # enough that this fires on real calendars, and retracing a cell is
+        # far less jarring than teleporting across the grid. Cells reached this
+        # way are not collected twice.
+        best = best or loose or _retrace(grid, col, row, path, scale, start, rng)
         col, row = best
         path.append(best)
         visited.add(best)
@@ -526,18 +577,36 @@ def _has_escape(
     )
 
 
-def _nearest_unvisited(
-    grid: Grid, visited: set[tuple[int, int]], col: int, scale: float, start: int
-) -> tuple[int, int] | None:
-    for search_col in list(range(col + 1, COLS)) + list(range(col - 1, start - 1, -1)):
-        candidates = [
-            (search_col, r) for r in range(ROWS) if (search_col, r) not in visited
-        ]
-        if candidates:
-            return max(
-                candidates, key=lambda c: lookahead_score(grid, c[0], c[1], scale)
-            )
-    return None
+def _retrace(
+    grid: Grid,
+    col: int,
+    row: int,
+    path: Sequence[tuple[int, int]],
+    scale: float,
+    start: int,
+    rng: random.Random,
+) -> tuple[int, int]:
+    """Best 8-way neighbour when every unvisited one is gone.
+
+    Visited cells are allowed here -- that is the point -- but the cell just
+    left is excluded so the robot cannot oscillate between two squares. At
+    least two candidates always remain, so this never fails.
+    """
+    previous = path[-2] if len(path) > 1 else None
+    candidates = [
+        (col + dc, row + dr)
+        for dc, dr in NEIGHBOURS
+        if start <= col + dc < COLS and 0 <= row + dr < ROWS
+    ]
+    fresh = [c for c in candidates if c != previous] or candidates
+    return max(
+        fresh,
+        key=lambda c: (
+            lookahead_score(grid, c[0], c[1], scale)
+            + BASE_DRIFT * (c[0] - col)
+            + rng.random() * JITTER
+        ),
+    )
 
 
 def build_word_grid(word: str, end_day: date) -> Grid:
@@ -642,6 +711,47 @@ def build_word_path(grid: Grid) -> list[tuple[int, int]]:
     return path
 
 
+def build_return_path(
+    outbound: Sequence[tuple[int, int]], rng: random.Random
+) -> list[tuple[int, int]]:
+    """The walk home: right edge back to the start column.
+
+    Deliberately not the outbound route reversed, which reads as mechanical.
+    Cells on the outbound path are penalised rather than forbidden, so the
+    robot threads fresh ground where it can and crosses its own trail where it
+    must. Same 8-way steps and same facing rule as the outbound wander; it
+    just does not collect anything.
+    """
+    target = outbound[0][0]
+    col, row = outbound[-1]
+    on_outbound = set(outbound)
+    visited = {(col, row)}
+    path: list[tuple[int, int]] = []
+
+    while col > target and len(path) < MAX_STEPS:
+        best: tuple[int, int] | None = None
+        best_score = float("-inf")
+        for dc, dr in NEIGHBOURS:
+            nc, nr = col + dc, row + dr
+            if not (target <= nc < COLS and 0 <= nr < ROWS):
+                continue
+            if (nc, nr) in visited:
+                continue
+            score = -BASE_DRIFT * dc + rng.random() * JITTER
+            if (nc, nr) in on_outbound:
+                score -= RETRACE_PENALTY
+            if not _has_escape(visited, nc, nr, target):
+                score -= TRAP_PENALTY
+            if score > best_score:
+                best_score, best = score, (nc, nr)
+        if best is None:
+            break
+        col, row = best
+        path.append(best)
+        visited.add(best)
+    return path
+
+
 def build_timeline(
     grid: Grid, path: Sequence[tuple[int, int]], *, allow_dwell: bool = True
 ) -> list[Step]:
@@ -678,6 +788,90 @@ def build_timeline(
 # --------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Timeline:
+    """The whole loop: an outbound walk, a turn, a walk home, then a reset."""
+
+    steps: list[Step]
+    cycle: float
+    reset_at: float
+    turn_index: int | None
+    outbound_step: float
+    return_step: float
+
+
+def build_round_trip(
+    grid: Grid, outbound: Sequence[tuple[int, int]], rng: random.Random
+) -> Timeline:
+    """Outbound wander, a pause to turn, then the walk home.
+
+    The outbound leg keeps its fixed RUN_SECONDS -- it is never compressed to
+    make room. The return leg is sized from the outbound step and then, only if
+    the loop would breach MAX_CYCLE_SECONDS, walked faster still.
+    """
+    steps = build_timeline(grid, outbound, allow_dwell=True)
+    outbound_step = min(step.depart - step.arrive for step in steps)
+    turn_index = len(steps) - 1
+
+    # The turn: hold at the right edge, flipping facing, before heading back.
+    # hold_until must stay strictly below depart. If they are equal, this
+    # step's hold keyframe lands on the same percentage as the next step's
+    # arrival keyframe, the later declaration wins, and the robot slides off
+    # the edge during its pause instead of standing still.
+    last = steps[turn_index]
+    turn_depart = last.depart + TURN_SECONDS
+    steps[turn_index] = Step(
+        col=last.col,
+        row=last.row,
+        count=last.count,
+        dwell=last.dwell,
+        arrive=last.arrive,
+        hold_until=turn_depart - outbound_step * MOVE_FRACTION,
+        depart=turn_depart,
+    )
+
+    home = build_return_path(outbound, rng)
+    return_step = outbound_step / RETURN_SPEEDUP
+    if home:
+        budget = (
+            MAX_CYCLE_SECONDS
+            - RUN_SECONDS
+            - TURN_SECONDS
+            - ARRIVAL_SECONDS
+            - RESET_SECONDS
+        )
+        return_step = min(return_step, budget / len(home))
+
+    move = return_step * MOVE_FRACTION
+    t = steps[turn_index].depart
+    for index, (col, row) in enumerate(home):
+        slot = return_step + (ARRIVAL_SECONDS if index == len(home) - 1 else 0.0)
+        hold = t + (slot if index == len(home) - 1 else max(slot - move, slot * 0.15))
+        steps.append(
+            Step(
+                col=col,
+                row=row,
+                count=count_at(grid, col, row),
+                dwell=False,
+                arrive=t,
+                hold_until=hold,
+                depart=t + slot,
+                collecting=False,  # walking home, not re-harvesting
+            )
+        )
+        t += slot
+
+    reset_at = steps[-1].depart
+    return Timeline(
+        steps=steps,
+        cycle=reset_at + RESET_SECONDS,
+        reset_at=reset_at,
+        turn_index=turn_index,
+        outbound_step=outbound_step,
+        return_step=return_step,
+    )
+
+
 def build_facings(steps: Sequence[Step]) -> list[int]:
     """+1 facing right, -1 facing left, looking ahead to the next column."""
     facings: list[int] = []
@@ -693,7 +887,9 @@ def build_facings(steps: Sequence[Step]) -> list[int]:
     return facings
 
 
-def build_pose_segments(steps: Sequence[Step]) -> list[tuple[float, float, str, int]]:
+def build_pose_segments(
+    steps: Sequence[Step], cycle: float, turn_index: int | None = None
+) -> list[tuple[float, float, str, int]]:
     """Chronological ``(start, end, pose, facing)`` covering the whole cycle.
 
     While travelling the sprite alternates stand/step on GAIT_PERIOD, phased
@@ -713,15 +909,22 @@ def build_pose_segments(steps: Sequence[Step]) -> list[tuple[float, float, str, 
             segments.append((t, nxt, "stand" if index % 2 == 0 else "step", facing))
             t = nxt
 
-    for step, facing in zip(steps, facings):
-        if step.dwell:
+    for index, (step, facing) in enumerate(zip(steps, facings)):
+        if index == turn_index:
+            # Arrive facing the way it was going, stand still, then turn round
+            # halfway through the pause and set off home.
+            middle = (step.arrive + step.hold_until) / 2.0
+            segments.append((step.arrive, middle, "stand", 1))
+            segments.append((middle, step.hold_until, "stand", -1))
+            alternate(step.hold_until, step.depart, facing)
+        elif step.dwell:
             segments.append((step.arrive, step.hold_until, "grab", facing))
             alternate(step.hold_until, step.depart, facing)
         else:
             alternate(step.arrive, step.depart, facing)
 
     # Settle: stand still until the cycle resets.
-    segments.append((RUN_SECONDS, CYCLE_SECONDS, "stand", facings[-1]))
+    segments.append((steps[-1].depart, cycle, "stand", facings[-1]))
 
     merged: list[tuple[float, float, str, int]] = []
     for start, end, pose, facing in segments:
@@ -745,9 +948,9 @@ def num(value: float) -> str:
     return text if text not in ("", "-0") else "0"
 
 
-def pct(seconds: float) -> str:
+def pct(seconds: float, cycle: float) -> str:
     """Seconds on the cycle timeline -> a keyframe percentage."""
-    value = max(0.0, min(100.0, seconds / CYCLE_SECONDS * 100.0))
+    value = max(0.0, min(100.0, seconds / cycle * 100.0))
     text = f"{value:.3f}".rstrip("0").rstrip(".")
     return (text if text else "0") + "%"
 
@@ -781,7 +984,9 @@ def month_labels(grid: Grid) -> list[tuple[int, str]]:
     return labels
 
 
-def opacity_keyframes(name: str, windows: Sequence[tuple[float, float]]) -> str:
+def opacity_keyframes(
+    name: str, windows: Sequence[tuple[float, float]], cycle: float
+) -> str:
     """Show the element only during ``windows``; base opacity is 0.
 
     Paired with ``animation-timing-function: steps(1, end)`` so each stop holds
@@ -791,10 +996,10 @@ def opacity_keyframes(name: str, windows: Sequence[tuple[float, float]]) -> str:
     if not windows or windows[0][0] > 0.0:
         parts.append("0%{opacity:0}")
     for start, end in windows:
-        parts.append(f"{pct(start)}{{opacity:1}}")
-        if end < CYCLE_SECONDS:
-            parts.append(f"{pct(end)}{{opacity:0}}")
-    if not windows or windows[-1][1] < CYCLE_SECONDS:
+        parts.append(f"{pct(start, cycle)}{{opacity:1}}")
+        if end < cycle:
+            parts.append(f"{pct(end, cycle)}{{opacity:0}}")
+    if not windows or windows[-1][1] < cycle:
         parts.append("100%{opacity:0}")
     return f"@keyframes {name}{{" + "".join(parts) + "}"
 
@@ -808,6 +1013,8 @@ def render_style(
     steps: Sequence[Step],
     collected: Sequence[tuple[int, Step, int]],
     mode: RenderMode = CONTRIBUTION_MODE,
+    cycle: float = WORDMARK_CYCLE,
+    reset_at: float | None = None,
 ) -> str:
     """Variables, classes, and the shared/robot keyframes.
 
@@ -834,7 +1041,7 @@ def render_style(
     )
     lines.append(
         f".col{{{outline}"
-        f"animation-duration:{num(CYCLE_SECONDS)}s;animation-iteration-count:infinite;"
+        f"animation-duration:{num(cycle)}s;animation-iteration-count:infinite;"
         "animation-timing-function:ease-out}"
     )
     lines.append(
@@ -843,23 +1050,23 @@ def render_style(
     )
     lines.append(
         f".cv{{fill:var(--counter);font:700 15px {FONT};opacity:0;"
-        f"animation-duration:{num(CYCLE_SECONDS)}s;animation-iteration-count:infinite;"
+        f"animation-duration:{num(cycle)}s;animation-iteration-count:infinite;"
         "animation-timing-function:steps(1,end)}"
     )
     lines.append(
-        f".p{{fill:var(--counter);opacity:0;animation:fly {num(CYCLE_SECONDS)}s "
+        f".p{{fill:var(--counter);opacity:0;animation:fly {num(cycle)}s "
         "linear infinite}"
     )
     lines.append(
-        f".robot{{animation:walk {num(CYCLE_SECONDS)}s linear infinite}}"
-        f".rp{{opacity:0;animation-duration:{num(CYCLE_SECONDS)}s;"
+        f".robot{{animation:walk {num(cycle)}s linear infinite}}"
+        f".rp{{opacity:0;animation-duration:{num(cycle)}s;"
         "animation-iteration-count:infinite;animation-timing-function:steps(1,end)}"
     )
 
     # Particles: one shared flight, aimed per element via --dx/--dy.
     lines.append(
         "@keyframes fly{0%{opacity:1;transform:translate(0,0)}"
-        f"{pct(PARTICLE_SECONDS)}{{opacity:0;"
+        f"{pct(PARTICLE_SECONDS, cycle)}{{opacity:0;"
         "transform:translate(var(--dx),var(--dy))}"
         "100%{opacity:0;transform:translate(var(--dx),var(--dy))}}"
     )
@@ -870,9 +1077,9 @@ def render_style(
     for step in steps:
         x, y = cell_centre(step.col, step.row)
         position = f"transform:translate({num(x)}px,{num(y)}px)"
-        walk.append(f"{pct(step.arrive)}{{{position}}}")
+        walk.append(f"{pct(step.arrive, cycle)}{{{position}}}")
         if step.hold_until > step.arrive:
-            walk.append(f"{pct(step.hold_until)}{{{position}}}")
+            walk.append(f"{pct(step.hold_until, cycle)}{{{position}}}")
     last = steps[-1]
     lx, ly = cell_centre(last.col, last.row)
     walk.append(f"100%{{transform:translate({num(lx)}px,{num(ly)}px)}}")
@@ -882,25 +1089,29 @@ def render_style(
     # The idle colour has to be named explicitly: `fill: inherit` would take
     # the parent group's fill (black) rather than the cell's own level class,
     # because an animation overrides the class for the whole cycle.
-    reset_start = mode.reset_at
-    reset_end = min(CYCLE_SECONDS, reset_start + RESET_SECONDS)
+    reset_start = mode.reset_at if reset_at is None else reset_at
+    reset_end = min(cycle, reset_start + RESET_SECONDS)
     edge_off, edge_on = ("stroke-opacity:0", "stroke-opacity:1") if mode.outline else ("", "")
     for index, step, level in collected:
         idle = "var(--empty)" if level == 0 else f"var(--l{level})"
         flip = min(step.arrive + COLLECT_SECONDS, reset_start)
         lines.append(
             f"@keyframes k{index}{{"
-            f"0%,{pct(step.arrive)}{{fill:{idle}{';' + edge_off if edge_off else ''}}}"
-            f"{pct(flip)},{pct(reset_start)}{{fill:{mode.collect_fill}"
+            f"0%,{pct(step.arrive, cycle)}{{fill:{idle}"
+            f"{';' + edge_off if edge_off else ''}}}"
+            f"{pct(flip, cycle)},{pct(reset_start, cycle)}{{fill:{mode.collect_fill}"
             f"{';' + edge_on if edge_on else ''}}}"
-            f"{pct(reset_end)},100%{{fill:{idle}{';' + edge_off if edge_off else ''}}}}}"
+            f"{pct(reset_end, cycle)},100%{{fill:{idle}"
+            f"{';' + edge_off if edge_off else ''}}}}}"
         )
     return "\n".join(lines)
 
 
-def render_robot(steps: Sequence[Step]) -> tuple[str, str]:
+def render_robot(
+    steps: Sequence[Step], cycle: float, turn_index: int | None = None
+) -> tuple[str, str]:
     """The robot group plus the keyframes driving its pose swaps."""
-    segments = build_pose_segments(steps)
+    segments = build_pose_segments(steps, cycle, turn_index)
 
     windows: dict[tuple[str, int], list[tuple[float, float]]] = {}
     for start, end, pose, facing in segments:
@@ -910,7 +1121,7 @@ def render_robot(steps: Sequence[Step]) -> tuple[str, str]:
     keyframes: list[str] = []
     for index, ((pose, facing), spans) in enumerate(sorted(windows.items())):
         name = f"rp{index}"
-        keyframes.append(opacity_keyframes(name, spans))
+        keyframes.append(opacity_keyframes(name, spans, cycle))
         uses.append(
             robot_use(
                 0.0,
@@ -935,11 +1146,15 @@ def render_svg(
     mode = WORDMARK_MODE if word else CONTRIBUTION_MODE
 
     if word:
-        # Deterministic serpentine, so every letter cell is reached.
-        path = build_word_path(grid)
+        # Deterministic serpentine, so every letter cell is reached. No return
+        # leg here: the payoff is the finished word, held and then reset.
+        steps = build_timeline(grid, build_word_path(grid), allow_dwell=False)
+        cycle, reset_at, turn_index = WORDMARK_CYCLE, mode.reset_at, None
     else:
-        path = build_path(grid, random.Random(grid_end_date(grid).isoformat()))
-    steps = build_timeline(grid, path, allow_dwell=mode.dwell)
+        rng = random.Random(grid_end_date(grid).isoformat())
+        trip = build_round_trip(grid, build_path(grid, rng), rng)
+        steps, cycle = trip.steps, trip.cycle
+        reset_at, turn_index = trip.reset_at, trip.turn_index
 
     def level_at(col: int, row: int) -> int:
         cell = grid[col][row]
@@ -947,11 +1162,17 @@ def render_svg(
 
     # In wordmark mode only glyph cells animate. The robot walks the gaps
     # between letters, but lighting those up would smear the word.
-    collected = [
-        (index, step, 0 if word else level_at(step.col, step.row))
-        for index, step in enumerate(steps)
-        if not word or step.count > 0
-    ]
+    # Only the outbound leg collects; the walk home leaves everything as it
+    # found it. In wordmark mode only glyph cells count.
+    seen: set[tuple[int, int]] = set()
+    collected: list[tuple[int, Step, int]] = []
+    for index, step in enumerate(steps):
+        if not step.collecting or (word and step.count <= 0):
+            continue
+        if (step.col, step.row) in seen:
+            continue  # retraced cell: collect once, on first arrival
+        seen.add((step.col, step.row))
+        collected.append((index, step, 0 if word else level_at(step.col, step.row)))
     step_by_position = {(step.col, step.row): index for index, step, _ in collected}
 
     # Counter windows: the value only changes when a cell with commits is hit.
@@ -974,21 +1195,23 @@ def render_svg(
             f'animation-delay:{num(step.arrive)}s"/>'
         )
 
+    # The final value holds to the end of the cycle, so the counter stays put
+    # while the robot walks home.
     counter_windows = (
         [
-            (start, starts[i + 1] if i + 1 < len(starts) else CYCLE_SECONDS)
+            (start, starts[i + 1] if i + 1 < len(starts) else cycle)
             for i, start in enumerate(starts)
         ]
         if mode.counter
         else []
     )
 
-    robot, pose_keyframes = render_robot(steps)
+    robot, pose_keyframes = render_robot(steps, cycle, turn_index)
     style = "\n".join(
         [
-            render_style(steps, collected, mode),
+            render_style(steps, collected, mode, cycle, reset_at),
             "\n".join(
-                opacity_keyframes(f"v{i}", [window])
+                opacity_keyframes(f"v{i}", [window], cycle)
                 for i, window in enumerate(counter_windows)
             ),
             pose_keyframes,
@@ -1052,9 +1275,11 @@ def render_svg(
         desc = (
             f"An animated GitHub contribution grid for {safe_user}. "
             f"The year&#8217;s total is {year_total:,} contributions. "
-            f"A small robot wanders {len(steps)} of the {COLS * ROWS} cells and "
-            f"collects {values[-1]:,} contributions over {num(RUN_SECONDS)} "
-            "seconds, then the animation resets and repeats."
+            f"A small robot wanders {len(collected)} of the {COLS * ROWS} cells "
+            f"and collects {values[-1]:,} contributions over "
+            f"{num(RUN_SECONDS)} seconds, then walks back to where it started "
+            f"before the animation resets and repeats every {num(cycle)} "
+            "seconds."
         )
 
     return (
