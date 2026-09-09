@@ -28,8 +28,9 @@ parse_args
        └─ extract_weeks      unwrap data/user/contributionsCollection/contributionCalendar
             └─ build_grid    ragged weeks -> strict 53x7 Grid[col][row] of Cell|None
                  └─ render_svg
-                      ├─ start_column      skip a dead lead-in (first_active_column - 2)
-                      ├─ build_path        seeded wander, no revisits          (RNG seed = end date)
+                      ├─ start_column      density point (dense_column - 2), capped by MIN_SPAN_COLS
+                      ├─ build_path        seeded wander, retraces if boxed in (RNG seed = end date)
+                      ├─ build_round_trip  outbound + turn + build_return_path -> Timeline
                       ├─ build_timeline    Step slots filling RUN_SECONDS
                       ├─ build_pose_segments / build_facings   sprite pose + facing timeline
                       ├─ render_style      :root vars, classes, walk + cell keyframes
@@ -44,8 +45,8 @@ parse_args
 | `scripts/generate_robot_svg.py` | everything except the sprite art: fetch, normalise, path, timeline, CSS, SVG assembly, CLI |
 | `scripts/robot_sprite.py` | 6 `<symbol>` poses + `robot_use()`; art only, no timing logic |
 | `scripts/grid_font.py` | 5x7 bitmap font, A-Z + space, `layout()`; no knowledge of the grid or the robot |
-| `tests/test_generate_robot_svg.py` | 55 tests for contribution mode, grouped by section comment |
-| `tests/test_wordmark.py` | 39 tests for the font and wordmark mode |
+| `tests/test_generate_robot_svg.py` | 71 tests for contribution mode, grouped by section comment |
+| `tests/test_wordmark.py` | 40 tests for the font and wordmark mode |
 | `tests/fixtures/sample_calendar.json` | 53 weeks, deliberately partial first/last week, active from column 0, 742 contributions |
 | `tests/fixtures/late_start_calendar.json` | same shape but dead until column 16, so the start-column logic has something to bite on; 818 contributions |
 | `requirements.txt` | `requests` (live fetch only; lazily imported) |
@@ -72,6 +73,10 @@ sprite pose timeline, SVG helpers, rendering, CLI.
 | Why is the walk shaped like that? | `build_path` docstring (the pacing gate) |
 | Why doesn't it start at column 0? | `start_column` docstring |
 | Why is the pace different per calendar? | `target_cells` + the Timing block |
+| How fast does it walk, and why? | `CELLS_PER_COLUMN` comment — it is the only pace lever |
+| Where does the walk start? | `start_column` / `dense_column` docstrings |
+| How does the walk home work? | `build_round_trip` / `build_return_path` |
+| Why is there no `CYCLE_SECONDS`? | the two modes have different cycle lengths; it is a parameter now |
 | Why does the wordmark sweep full columns? | `build_word_path` docstring |
 | What differs between the two modes? | `RenderMode`, and its two instances |
 | Why per-element keyframes not `animation-delay`? | `render_style` docstring |

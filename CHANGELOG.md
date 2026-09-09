@@ -1,5 +1,72 @@
 # CHANGELOG
 
+## 2026-09-09 — Density start, denser walk, and a walk home
+
+### What changed
+- **Start where the grid gets busy.** `column_totals()` and `dense_column()`
+  find the furthest-right column that still has `DENSITY_SHARE = 70%` of the
+  year ahead of it; `start_column()` backs up `LEAD_IN_COLS` from there. Capped
+  by `MIN_SPAN_COLS = 30` so the skip can never starve the walk of cells.
+  Columns left of the start still render normally.
+- **`CELLS_PER_COLUMN` raised 1.47 → 2.24**, putting the outbound step at
+  **0.306s** on the real calendar (was 0.500s). `RUN_SECONDS` unchanged at 22s
+  — a denser walk, not a longer one.
+- **The robot walks home instead of snapping back.** New `build_return_path()`,
+  `build_round_trip()` and a `Timeline` dataclass. `Step` gained a `collecting`
+  flag; the return leg collects nothing, the counter holds its final value, and
+  collected cells keep their colour until the robot is home.
+- `CYCLE_SECONDS` is no longer a module constant — the two modes have different
+  cycle lengths, so the cycle is threaded through `pct()`,
+  `opacity_keyframes()`, `render_style()`, `render_robot()` and
+  `build_pose_segments()`. Wordmark mode keeps `WORDMARK_CYCLE = 24s`.
+- 17 new tests (94 → 111).
+
+### Timing on the real calendar (374 contributions)
+| leg | |
+|---|---|
+| start column | 23 (span 30 cols) |
+| outbound | 64 cells, 4 dwells, **0.306s/step**, 22.00s (fixed) |
+| turn | 0.60s |
+| return | 30 cells, **0.204s/step** (1.50×), 6.91s |
+| arrival + reset | 1.80s |
+| **total** | **30.51s** (cap 35s) |
+
+### Decisions
+- **The 70% rule is the *latest* qualifying column, not the earliest.** Read
+  literally, "the earliest column whose remaining span holds ≥70%" is column 0,
+  since the whole grid holds 100% — which would make the robot walk *more*
+  empty space. Raised before implementing.
+- **The density rule is inert on the current calendar.** 90% of the year sits in
+  the last five columns, so the raw density point is column 48: a 7-column walk
+  at ~0.92s/step. `MIN_SPAN_COLS` pulls it back to 23, which is exactly what the
+  old first-non-zero rule produced. The rule exists for calendars with genuine
+  scattered noise ahead of a dense region.
+- **"1.5x the outbound step" taken as 1.5× speed**, not 1.5× duration: the
+  slower reading puts the cycle near 47s, well past the 35s ceiling.
+- If the loop would breach `MAX_CYCLE_SECONDS` the *return* leg is walked
+  faster. The outbound 22s is never compressed.
+
+### Bugs found and fixed
+- **The teleport fallback started firing.** With the denser walk, `build_path`
+  boxed itself in on the real calendar and `_nearest_unvisited` jumped four
+  cells, from (49,6) to (50,2). Replaced with `_retrace`, which steps back onto
+  ground already walked (excluding the cell just left, so it cannot oscillate).
+  Retraced cells are collected once, on first arrival.
+- **The robot drifted off the edge during its turn.** The turn step had
+  `hold_until == depart`, which lands its hold keyframe on the same percentage
+  as the next step's arrival keyframe; the later declaration wins, so instead of
+  standing still the robot interpolated toward the return cell. Caught by
+  probing the browser and finding it at column 51.29 when it should have been
+  at 52.00. There is now a test asserting no step has `hold_until == depart`.
+
+### Verification
+`ruff check` clean, 111/111 tests pass. Rendered from the real payload and
+probed in headless Chrome by seeking the clock: t=11s outbound at col 40 with
+35 collected and counter 9; t=22.0s **held at col 52.00 facing outbound**;
+t=22.3s **still col 52.00, now facing home**; t=22.55s departing at 51.29;
+t=26s at 35.55 with the counter still 241; t=29.8s home at col 23 with the grid
+reset. 61.5 KB.
+
 ## 2026-09-05 — Publish the wordmark daily; fix its calendar span
 
 ### What changed

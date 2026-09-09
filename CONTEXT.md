@@ -17,10 +17,13 @@ written.
    served in READMEs. All animation is CSS `@keyframes` in a `<style>` block.
    A test asserts there is no `<script`, no `javascript:`, and no inline
    `on*=` handler.
-2. **Under 150 KB.** Currently 73.4 KB from the sample fixture. The byte size
-   is printed at the end of every run and asserted in tests.
+2. **Under 150 KB.** Currently 61.5 KB from the real calendar and 62.7 KB for
+   the wordmark. The byte size is printed at the end of every run and asserted
+   in tests.
 3. **Deterministic.** Same calendar in → byte-identical SVG out. The RNG is
-   seeded with the calendar's end date.
+   seeded with the calendar's end date. (Wordmark mode is deterministic given
+   the date; its calendar dates come from "today" so the month labels track the
+   calendar, matching the contribution SVG beside it.)
 4. **No fixed `width`/`height` on the root `<svg>`** — `viewBox` only, so it
    scales to whatever container the README puts it in.
 5. **Type hints throughout; no dependencies beyond `requests`.** `requests` is
@@ -85,15 +88,25 @@ GitHub's own level enum.
 ## The wander
 
 - Seeded `random.Random(end_date.isoformat())`.
-- **Starts at the first active column, not column 0.** `first_active_column()`
-  finds the leftmost column with any contributions, and `start_column()` backs
-  up `LEAD_IN_COLS = 2` for lead-in (falling back to 0 on a wholly empty grid).
-  Without this, a calendar with a long dead stretch at the start has the robot
-  trudging through empty columns for most of the animation. Columns left of the
-  start still render as normal cells — the robot simply never walks them, and
-  the neighbour scan, `_has_escape` and `_nearest_unvisited` are all bounded at
-  `start` so nothing can drop it back into the dead region.
-- Random row; 8-way steps; never revisits a cell.
+- **Starts where the grid gets busy.** `dense_column()` finds the
+  furthest-right column that still has `DENSITY_SHARE = 70%` of the year ahead
+  of it, and `start_column()` backs up `LEAD_IN_COLS = 2`. Note this is the
+  *latest* qualifying column, not the earliest — taken literally, "the earliest
+  column whose remaining span holds 70%" is always column 0, since the whole
+  grid trivially holds 100%, which would make the robot walk *more* empty
+  space. Falls back to column 0 on a wholly empty grid.
+- **The skip is capped by `MIN_SPAN_COLS = 30`.** This matters more than it
+  sounds. The real calendar has 90% of its 374 contributions in the last five
+  columns, so the raw density point is column 48 — a 7-column walk with only 49
+  cells in reach, which crawls at ~0.92s per step against a fixed 22s. The cap
+  pulls the start back to 23, giving a 30-column span. On the current calendar
+  the density rule is therefore inert and the result matches the old
+  first-non-zero behaviour exactly; it exists for calendars with genuine
+  scattered noise ahead of a dense region.
+- Columns left of the start still render as normal cells — real data stays
+  visible. The robot simply never walks them, and the neighbour scan,
+  `_has_escape` and `_retrace` are all bounded at `start`.
+- Random row; 8-way steps; avoids revisiting except via `_retrace` below.
 - Candidate score = own count ×2 + a distance-weighted peek at the next 3
   columns (rows ±1), all normalised by the year's max count, plus a constant
   rightward drift (`BASE_DRIFT = 0.6`) and a seeded jitter (0.15).
@@ -103,30 +116,72 @@ GitHub's own level enum.
   is what makes it a wander rather than a sweep.
 - **Target length scales with the span.** `target_cells(start)` returns
   `round(CELLS_PER_COLUMN * span)`, floored at `MIN_CELLS_FLOOR = 24` and
-  capped at what is reachable (`span * 7`). `CELLS_PER_COLUMN` is derived as
-  `MIN_CELLS / COLS ≈ 1.472`, chosen so a full-width calendar computes to
-  exactly 78 and reproduces the pre-start-column behaviour byte for byte.
-  Because `base_step = 22 / total_units` is derived, a shorter span means
-  fewer cells over the same 22s — i.e. a slower, more deliberate pace, rather
-  than the same sprint followed by idling. The floor exists because a
-  three-column active region would otherwise collapse to ~4 cells and give
-  single steps over five seconds long.
+  capped at what is reachable (`span * 7`). Because `base_step = 22 /
+  total_units` is derived, a shorter span means fewer cells over the same 22s
+  — a slower, more deliberate pace rather than the same sprint followed by
+  idling. The floor exists because a three-column active region would
+  otherwise collapse to ~4 cells and give single steps over five seconds long.
+- **`CELLS_PER_COLUMN = 2.24` is the pace lever**, and the only one. It was
+  raised from ~1.47 to put the outbound step near 0.30s on the current
+  calendar. Watch out: the step is `22s / units`, not `22s / cells`, and a
+  dwell costs three units — so cells alone don't set it. On the real calendar
+  a 30-column span asks for 67 cells, the wander delivers 64, four of them
+  dwell, and 72 units over 22s gives **0.306s**. `RUN_SECONDS` never moves;
+  a denser walk is the goal, not a longer one.
 - **Trap penalty** (`TRAP_PENALTY = 10`): a candidate with no unvisited
   neighbour of its own is heavily penalised, which keeps the walk 8-way
-  connected instead of having to teleport out of a dead end.
-- Fallbacks in order: gated best → ungated best → nearest unvisited column to
-  the right. The last one would visibly teleport; the trap penalty keeps it
-  from firing on real data.
+  connected instead of dead-ending.
+- Fallbacks in order: gated best → ungated best → **`_retrace`**, which steps
+  back onto ground already walked (excluding the cell just left, so it cannot
+  oscillate). This replaced a "jump to the nearest unvisited column" fallback
+  that *teleported* — with the denser walk it fired on the real calendar and
+  produced a visible 4-cell hop from (49,6) to (50,2). A retraced cell is
+  collected once, on first arrival.
 - Dwell: a cell whose count is at or above the 75th percentile of non-zero
   counts holds for 3× a normal step.
 
-On `sample_calendar.json` (active from column 0): starts at column 0, 76 cells,
-22 backtracking moves, 51 vertical moves, 32 dwells, ends at column 52, base
-step 0.157s, collects 312 of 742.
+## The round trip
 
-On `late_start_calendar.json` (dead until column 16): starts at column 14,
-55 cells, never goes left of 14, ends at column 52, base step 0.214s — 36%
-slower — collects 363 of 818.
+The cycle no longer ends with the robot snapping back to the start. It walks
+home. `build_round_trip()` assembles the whole loop and returns a `Timeline`
+(steps, cycle, reset_at, turn_index, outbound_step, return_step).
+
+| leg | detail |
+|---|---|
+| **Outbound** | the existing wander, `RUN_SECONDS = 22s`, **fixed** — never compressed to make room for the return |
+| **Turn** | `TURN_SECONDS = 0.6s` added to the last outbound step's slot; the robot stands at the right edge and flips facing halfway through the pause |
+| **Return** | `build_return_path()` walks back to the start column at `outbound_step / RETURN_SPEEDUP`; collects nothing |
+| **Arrival** | `ARRIVAL_SECONDS = 0.8s` hold, then `RESET_SECONDS = 1s` fade |
+
+- `Step.collecting` is `False` on the return leg. The counter's final value
+  window runs to the end of the cycle, so it holds while the robot walks home,
+  and collected cells keep their colour until `reset_at`.
+- The return route is *not* the outbound path reversed — that reads as
+  mechanical. Cells on the outbound path get `RETRACE_PENALTY = 0.6`, a soft
+  nudge rather than a ban, so it threads fresh ground where it can. On the real
+  calendar only **1 of 30** return cells is shared with the outbound route.
+- `MAX_CYCLE_SECONDS = 35` is a hard ceiling. If the loop would breach it the
+  *return* leg is walked faster; the outbound 22s is never touched.
+- Wordmark mode has no return leg — its payoff is the finished word, so it
+  keeps the old `WORDMARK_CYCLE = 24s`. Because the two modes now have
+  different cycle lengths, `CYCLE_SECONDS` is gone as a module constant and
+  the cycle is threaded explicitly through `pct()`, `opacity_keyframes()`,
+  `render_style()`, `render_robot()` and `build_pose_segments()`.
+
+### Measured on the real calendar (374 contributions)
+
+| | |
+|---|---|
+| start column | 23 (span 30 cols) |
+| outbound | 64 cells, 4 dwells, **0.306s/step**, 22.00s |
+| turn | 0.60s |
+| return | 30 cells, **0.204s/step** (1.50×), 6.91s |
+| arrival + reset | 1.80s |
+| **total cycle** | **30.51s** (cap 35s) |
+| collected | 241 of 374 |
+
+On `sample_calendar.json` (active from column 0): 0.169s outbound step,
+cycle ~28.97s. On `late_start_calendar.json`: starts at column 14.
 
 ## Wordmark mode (`--word MERNA`)
 
@@ -352,8 +407,10 @@ confirmed correct.
   few spikes). Replacing it with a real `last_fetch.json` will change the path
   and the numbers in the path-shape tests' tolerances, though all assertions
   are written as ranges rather than exact values.
-- The daily workflow has never actually run. Its first execution will be the
-  first time the live API path is exercised at all.
+- The synthetic `sample_calendar.json` fixture is nothing like the real
+  calendar (commits from column 0 vs from column 25; 0.169s step vs 0.306s).
+  Several path-shape tests are tuned to it. Swapping in the real payload from
+  `output` is the obvious next job.
 - No README.md, so nothing yet references the raw URL on the `output` branch.
 - `robot-stand` / `robot-step` / `robot-grab` (the detailed trio) are emitted
   into every SVG's `<defs>` but never referenced by the animation. They cost

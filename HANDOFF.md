@@ -53,19 +53,31 @@ weeks, defeating the reason the labels are kept.
 the next cron. Note the trade: nothing on `output` is ever cleaned up now, so a
 renamed output file would leave its old name behind.
 
+## Current pacing (measured, real calendar)
+
+| | |
+|---|---|
+| start column | 23, from the density rule capped by `MIN_SPAN_COLS` |
+| outbound | 64 cells, **0.306s/step**, 22.00s fixed |
+| turn | 0.60s, facing flips mid-pause |
+| return | 30 cells, **0.204s/step** (1.50× brisker), 6.91s |
+| total cycle | **30.51s** (ceiling 35s) |
+
+`CELLS_PER_COLUMN = 2.24` is the only pace lever. The step is `22s / units`,
+not `22s / cells`, and a dwell costs three units — so don't reason from the
+cell count alone. Don't reason from the fixture either: it gives 0.169s where
+the real calendar gives 0.306s.
+
 ## Next priorities
 
-1. **Trigger the workflow by hand** from the Actions tab (`workflow_dispatch`)
-   and watch it. This is the first time the live API path will ever have run,
-   so failures are likeliest here: a `CONTRIBUTION_TOKEN` without `read:user`
-   fails at the render step with exit 3, and the publish step needs the `output`
-   branch to be creatable (it does not exist yet — the action creates it).
-2. **Real fixture.** Once a run succeeds, pull `last_fetch.json` off the
-   `output` branch and replace `tests/fixtures/sample_calendar.json` with it.
-   Confirm the real calendar's shape first (GitHub sometimes returns 54 weeks —
-   the trim path is tested but unexercised in anger), then re-read
-   `test_path_wanders_rather_than_sweeping`, whose thresholds are tuned to the
-   synthetic fixture.
+1. **Replace the synthetic fixture with the real payload.** The workflow has
+   run successfully several times, so `last_fetch.json` on `output` is real
+   data (374 contributions) — pull it down and swap it for
+   `tests/fixtures/sample_calendar.json`. The two disagree in ways that matter:
+   the synthetic one has commits from column 0 and gives a 0.169s step, the
+   real one starts at column 25 and gives 0.306s. Several path-shape tests are
+   tuned to the synthetic shape and will need re-reading, notably
+   `test_path_wanders_rather_than_sweeping`.
 3. **README** with the embed snippet pointing at the raw URL on `output`, e.g.
    `https://raw.githubusercontent.com/merna-s-saad/contribution-robot/output/contribution-robot.svg`.
 4. Optional: drop the three detailed sprite symbols from `<defs>` (~2 KB) if the
